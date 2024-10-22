@@ -1,0 +1,144 @@
+# Set up
+
+Load packages
+```{r}
+library(tidyverse)
+library(sf)
+library(tmap)
+```
+
+Set working directory to location of master 'Landmark' folder
+```{r setup}
+knitr::opts_knit$set(root.dir = "C:/Users/benji/Desktop/Landmark")
+```
+
+Set tmap defaults
+```{r}
+tmap_mode("plot")
+```
+
+
+# Importing and exploring data
+
+## Garnett et al
+See paper [here](https://www.nature.com/articles/s41893-018-0100-6)
+The [supplementary materials](https://static-content.springer.com/esm/art%3A10.1038%2Fs41893-018-0100-6/MediaObjects/41893_2018_100_MOESM1_ESM.pdf) document definitions as to what constitutes Indigenous territories in each country and where they obtained the data for each country.
+
+Note that this dataset only contains Indigenous territories, whereas Landmark additionally includes community territories. 
+```{r}
+garnett = st_read("Raw data/Garnett et al/IPL_IndigenousPeoplesLands_2017/IPL_2017.shp")
+```
+
+Let's check out what info the Garnett dataset contains
+```{r}
+garnett%>%data.frame()
+```
+We can see that it doesn't contain any attributes, merely polygons grouped by country (for 88 countries).
+
+Plot Garnett data
+```{r}
+tm_shape(garnett)+
+  tm_polygons()
+```
+Looks like pretty comprehensive global coverage. 
+
+## Landmark data
+
+### Indicative layer
+
+As per Landmark's [methodology](), "The Indicative Areas of Indigenous and Community Land Rights layer shows areas where indigenous and community lands likely exist but the data on the precise delimitation, recognition and/or documentation status of these are not available at this time."
+
+So this fulfills a similar function as the Garnett data in the sense that it doesn't have much additional information beyond where these territories are located (though this one includes community territories in addition to Indigenous lands).
+```{r}
+indicative = st_read("Raw data/Landmark data/Indicative_v202408/Indicative_v202408/Indicative_comm_poly_Aug2024.shp")
+
+indicative%>%data.frame()
+```
+
+
+
+```{r}
+paste("Data from", length(unique(indicative$Country)), "countries")
+```
+
+Note on columns (again, pulled from Landmark's methodology page):
+
+Identity: How the community self-identifies: As Indigenous Peoples or as non-indigenous Local Community. When unclear or unknown, the land is presented as community land.
+
+Recognition status: Recognition status by government in law or decree (i.e., acknowledged or not acknowledged by government)
+
+Documentation Status: The documentation status of the land. 
+For land that is acknowledged by government, there are two documentation status categories: 1) documented & 2) not documented
+For indigenous or community lands that are not acknowledged by government, there are two documentation status categories: 1) Held or used with formal land claim submitted, & 2) Held or used under customary tenure (without formal land claim submitted)
+The date field displays the year that the land attained the specified documentation status (if known).
+
+```{r}
+table(indicative$Identity)
+table(indicative$Form_Rec)
+table(indicative$Doc_Status)
+```
+Mainly appears to be community land rather than Indigenous. As expected, very few have recognition status or documentation status.
+
+Let's see how it looks on a map.
+```{r}
+tm_shape(indicative)+
+  tm_polygons()
+```
+Pretty poor coverage compared to the Garnett dataset, but some of the territories in North Africa, South Asia, Russia, etc. doesn't seem to be in the Garnett dataset, so perhaps there is a possibility of combining the two. 
+
+### Community lands
+
+This layer contains Indigenous and community lands alongside recognition status of the group, documentation status of their lands, and more.
+```{r}
+community_lands = st_read("Indigenous_comm_lands_v202408/Indigenous_comm_lands_v202408/CommunityLevelData_poly_Aug2024.shp")
+
+community_lands%>%data.frame()
+```
+
+```{r}
+paste("Data from", length(unique(community_lands$Country)), "countries")
+
+paste("Data from a total of", length(unique(union(community_lands$Country, indicative$Country))), "countries if we combine the community lands and indicative layers")
+```
+
+```{r}
+table(community_lands$Form_Rec)
+
+table(community_lands$Doc_Status)
+
+table(community_lands$Category)
+```
+Not a lot of variation--vast majority of polygons have recognition status and documented lands. A lot of variation in the 'category' column, which Landmark describes as "The categorical name that the local state gives to this type of indigenous or community land? (e.g., reservation, indigenous territory, customary lands)". Perhaps we could manually sort these into different recognition/documentation groups?
+
+
+```{r}
+tm_shape(community_lands)+
+  tm_polygons()
+```
+This community lands layer and the previous indicative layer don't seem to overlap. Therefore, in order to have a more complete dataset, We could try to track down recognition status and such for the territories in countries in the indicative layer (though it might be tough, as if it were easy to find, Landmark would likely have it already!)
+
+### Resource rights
+
+This layer displays "locations where community groups have rights to forests to harvest various products, rights to wildlife for hunting and fishing, or rights to pasture for herding and grazing". This means that it doesn't actually represent Indigenous and community territories, but rather areas where these groups have resource rights. 
+
+Could be useful if we're thinking about conflict, but not sure if it would be useful to include in other types of analysis. 
+
+```{r}
+resource_rights = st_read("Raw data/Landmark data/Resource_rights_v202408/Resource_rights_v202408/CommunityResources_Aug2024.shp")
+
+resource_rights%>%data.frame()
+```
+
+```{r}
+table(resource_rights$Category)
+```
+
+In addition to the previous variables we saw around identity, formal recognition, and documentation status, we now have the column 'Category', which includes options like forest areas, community forest, herding area, etc. 
+
+```{r}
+tm_shape(resource_rights)+
+  tm_polygons()
+```
+Appears quite limited in terms of number of countries. 
+
+
