@@ -1,3 +1,8 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
 # Set up
 
 Load packages
@@ -52,7 +57,7 @@ So this fulfills a similar function as the Garnett data in the sense that it doe
 ```{r}
 indicative = st_read("Raw data/Landmark data/Indicative_v202408/Indicative_v202408/Indicative_comm_poly_Aug2024.shp")
 
-indicative%>%data.frame()
+indicative%>%data.frame()%>%head()
 ```
 
 
@@ -90,9 +95,10 @@ Pretty poor coverage compared to the Garnett dataset, but some of the territorie
 
 This layer contains Indigenous and community lands alongside recognition status of the group, documentation status of their lands, and more.
 ```{r}
-community_lands = st_read("Indigenous_comm_lands_v202408/Indigenous_comm_lands_v202408/CommunityLevelData_poly_Aug2024.shp")
+community_lands = st_read("Raw data/Landmark data/Indigenous_comm_lands_v202408/Indigenous_comm_lands_v202408/CommunityLevelData_poly_Aug2024.shp")
+write.csv(community_lands, "Raw data/Landmark data/Indigenous_comm_lands_v202408/landmark_community_lands.csv", row.names = F)
 
-community_lands%>%data.frame()
+community_lands%>%data.frame()%>%head()
 ```
 
 ```{r}
@@ -102,11 +108,22 @@ paste("Data from a total of", length(unique(union(community_lands$Country, indic
 ```
 
 ```{r}
+table(community_lands$Identity)
+
 table(community_lands$Form_Rec)
 
 table(community_lands$Doc_Status)
 
 table(community_lands$Category)
+```
+
+To send to Mirja for further looks into possible groupings of categories
+```{r}
+community_lands_categories = community_lands%>%
+  group_by(Country, Category, Identity, Form_Rec, Doc_Status)%>%
+  reframe(n = n())%>%
+  arrange(Country)
+write.csv(community_lands_categories, "Raw data/Landmark data/category_by_country.csv", row.names = F)
 ```
 Not a lot of variation--vast majority of polygons have recognition status and documented lands. A lot of variation in the 'category' column, which Landmark describes as "The categorical name that the local state gives to this type of indigenous or community land? (e.g., reservation, indigenous territory, customary lands)". Perhaps we could manually sort these into different recognition/documentation groups?
 
@@ -126,7 +143,7 @@ Could be useful if we're thinking about conflict, but not sure if it would be us
 ```{r}
 resource_rights = st_read("Raw data/Landmark data/Resource_rights_v202408/Resource_rights_v202408/CommunityResources_Aug2024.shp")
 
-resource_rights%>%data.frame()
+resource_rights%>%data.frame()%>%head()
 ```
 
 ```{r}
