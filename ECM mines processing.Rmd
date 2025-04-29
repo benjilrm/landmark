@@ -1,0 +1,240 @@
+
+# Set up
+
+Load packages
+```{r}
+library(tidyverse)
+library(sf)
+library(tmap)
+library(readxl)
+library(rnaturalearth)
+```
+
+Settings and universal variables
+```{r}
+tmap_mode(mode = "view")
+sf_use_s2(FALSE)
+
+# define thresholds 
+maus_threshold <- 2500 # 2.5 km
+thresh_jas <- 5000 # 5 km
+
+crs = 4326
+```
+
+
+# Determine list of ECM commodities
+
+We include any commodities listed as ECM commodities in the following datasets:
+
+Owen et al. 
+[Dataset provided](https://espace.library.uq.edu.au/view/UQ:12b9a6e) as part of [Owen et al., 2022](https://www.nature.com/articles/s41893-022-00994-6#data-availability)
+```{r}
+owen = read_excel("Raw data/ETM Mines (Owen et al.).xlsx", sheet = 3)
+
+owen_commodities = as.vector(ecm$`ETM list`)
+```
+
+Sonter et al.
+[List of ECM commodities provided](https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-020-17928-5/MediaObjects/41467_2020_17928_MOESM1_ESM.pdf) as part of [Owen et al., 2022](https://www.nature.com/articles/s41467-020-17928-5#Sec13) (Supplementary Table 1)
+
+```{r}
+sonter = c("Gold", "Copper", "Silver", "Zinc", "Lead", "Iron Ore", "Nickel", "Molybdenum", "Cobalt", "Platinum", "Palladium", "Lanthanides", "Lithium", "Tin", "Tungsten", "Manganese", "Graphite", "Vanadium", "Bauxite", "Tantalum", "Chromite", "Antimony", "Titanium", "Niobium", "Zircon", "Yttrium", "Scandium", "Chromium", "Alumina", "Aluminum", "Platinum Group Metals")
+```
+
+Compare datasets
+```{r}
+#Commodities in Owen et al. but not Sonter et al.
+setdiff(owen_commodities, sonter)
+
+#Commodities in Sonter et al. but not Owen et al.
+setdiff(sonter, owen_commodities)
+
+#Commodities in both
+intersect(sonter, owen_commodities)
+```
+Generate comparison table
+```{r}
+all_commodities <- unique(c(sonter, owen_commodities))
+
+owen_sonter_comparison = data.frame(
+  commodity = all_commodities,
+  in_sonter = ifelse(all_commodities %in% sonter, 1, 0),
+  in_owen = ifelse(all_commodities %in% owen_commodities, 1, 0))%>%
+  arrange(commodity)
+```
+
+Export processed data
+```{r}
+write.csv(owen_sonter_comparison, "Processed data/owen_sonter_commodity_comparison.csv", row.names = F)
+```
+
+
+# USGS ECM Deposits
+
+First, import boundaries of countries that we will use for spatial joins with ECM deposits, mines, etc.
+```{r}
+countries = st_transform(ne_countries(scale = "medium"), crs)
+
+countries%>%data.frame()%>%filter(sovereignt == "France")
+#%>%filter(grepl("Franc", subunit))
+```
+
+
+ECM Deposit point data Downloaded from [USGS](https://www.sciencebase.gov/catalog/item/594d3c8ee4b062508e39b332)
+
+Filter for only deposits including commodities in our list of ECM commodities. Filter out any points in the middle of the ocean.
+```{r}
+usgs_deposits = st_read("Raw data/Global Distribution of Critical Minerals (USGS)/PP1802_CritMin_pts.shp")%>%
+  filter(grepl(paste(owen_sonter_comparison$commodity, collapse = "|"), CRITICAL_M, ignore.case = T) & !grepl("Ocean", LOCATION))%>%
+  st_join(., countries, join = st_nearest_feature)
+
+usgs_countries = data.frame(table(usgs_deposits$geounit))%>%
+  rename(country = 1, usgs_deposit_points = 2)
+```
+
+# ECM Mines
+
+## Point data
+Point data of mines obtained from S&P (private dataset--see [here](https://www.marketplace.spglobal.com/en/datasets/snl-metals-mining-(19))
+
+Filter for mines that are:
+- Active ("Activity_S" = "Active")
+- Operating (Development = "Operating", "Limited Production", "Advanced Production", "Preproduction")
+- Whose list of commodities produced include a commodity in our ECM commodity list above
+```{r}
+snp = st_read("Raw data/S&P (full)/S&P/MiningAssetsSHP.shp")%>%
+  filter(Activity.S == "Active" & Developmen %in% c("Operating", "Limited Production", "Advanced Production", "Preproduction") & grepl(paste(owen_sonter_comparison$commodity, collapse = "|"), `List.of.Co`, ignore.case = T))%>%
+  st_join(., countries, join = st_nearest_feature)
+
+snp_countries = data.frame(table(snp$geounit))%>%
+  rename(country = 1, snp_points = 2)
+```
+## Polygons
+Polygon data of mines obtained from Maus et al.
+```{r}
+maus = st_read("C:/Users/benji/Downloads/Land_Tenure_Paper-20250428T162244Z-001/Land_Tenure_Paper/Filtered_Mines_Maus_Jasanski.geojson")
+
+maus = st_read("Raw data/Maus et al/Global_Mining_Polygons_v2.shp")
+```
+
+## Joined
+
+Join Maus polygons with S&P points
+
+First, get Maus polygons within certain distance from nearest S&P point and record index of each polygon's nearest point
+```{r}
+within_distance <- st_is_within_distance(maus, snp, dist = maus_threshold)
+
+maus_filtered <- maus[apply(within_distance, 1, any), ]%>%
+  mutate(id = row_number())
+
+nearest_point_idx <- st_nearest_feature(maus_filtered, snp)
+
+nearest_points <- snp[nearest_point_idx, ]%>%
+  mutate(id = row_number())
+```
+
+Now, we can join the Maus polygons to their nearest points, so that we now have polygons with all columns
+```{r}
+maus_joined <- maus_filtered %>%
+  left_join(st_drop_geometry(nearest_points), by = "id")%>%
+  st_join(., countries, join = st_nearest_feature)
+
+maus_countries = data.frame(table(maus_joined$country))%>%
+  rename(country = 1, maus_polygons = 2)
+```
+
+# Finalise countries
+
+## ECM Countries
+
+First, generate lists of countries in each dataset
+```{r}
+mausc = unique(sort(maus_joined$country))
+snpc = unique(sort(snp$country))
+mine_c = union(mausc, snpc)
+
+usgsc = unique(sort(usgs_deposits$LOCATION))
+```
+
+Now, we can see which countries contain at least one of BOTH mines and deposits
+```{r}
+setdiff(mine_c, usgsc)
+setdiff(usgsc, mine_c)
+
+y_countries = intersect(snpc, usgsc)
+```
+
+## Landmark countries
+
+Import Landmark data, standardising country names to match those in the ECM countries
+```{r}
+landmark_full = st_transform(st_read("Raw data/Landmark data/Indigenous_comm_lands_v202411/CommunityLevelData_poly_202411.shp"), crs)%>%
+  mutate(Country = case_when(
+    Country == "Guyane Française" ~ "France",
+    grepl("England", Country) ~ "United Kingdom",
+    Country == "Perú" ~ "Peru", 
+    T ~ Country))
+
+landmark_partial = st_transform(st_read("Raw data/Landmark data/Indicative_v202411/Indicative_comm_poly_202411.shp"), crs)
+```
+
+
+```{r}
+landmarkc_full = unique(sort(landmark_full$Country))
+landmarkc_partial = unique(sort(landmark_partial$Country))
+landmark_c_all = union(landmarkc_full, landmarkc_partial)
+```
+
+## Garnett et al. countries
+```{r}
+garnett = st_read("Raw data/Garnett et al/IPL_IndigenousPeoplesLands_2017/IPL_2017.shp")%>%
+  left_join(., ne_countries(scale = "medium")%>%st_drop_geometry()%>%select(su_a3, geounit), by = c("Name_" = "su_a3"))
+
+garnett_c = unique(sort(garnett$geounit))
+garnett_c
+```
+
+
+https://www.landmarkmap.org/data-methods/community-level-data-sources
+```{r}
+country_master = data.frame(y_countries)%>%
+  rename(country = 1)%>%
+  mutate(
+    
+    landmark = case_when(
+    country %in% landmarkc_full ~ "Full Data",
+    country %in% landmarkc_partial ~ "Indicative areas",
+    country %in% c("Afghanistan", "China", "Finland", "Myanmar", "Norway", "Sweden") ~ "Only resource rights",
+    country %in% c("Armenia", "Austria", "Azerbaijan", "Belgium", "Bulgaria", "Cuba", "Dominican Republic", "Fiji", "Georgia", "Germany", "Ghana", "Greece", "Guinea", "Hungary", "Iran", "Israel", "Japan", "Kazakhstan", "Kosovo", "Kyrgyzstan", "Madagascar", "Mongolia", "New Caledonia", "Nigeria", "North Korea","Pakistan", "Poland", "Portugal", "Puerto Rico", "Romania", "Rwanda", "Saudi Arabia", "Senegal", "Sierra Leone", "Slovenia", "Solomon Islands", "South Korea", "Sri Lanka", "Thailand", "Turkey", "Ukraine", "Uzbekistan", "Vietnam") ~ "No data",
+    country %in% c("Indonesia", "Philippines", "Suriname") ~ "Available upon request"),
+    
+    in_garnett = ifelse(country %in% garnett_c, "Yes", "No"))%>%
+  left_join(., usgs_countries, by = "country")%>%
+  left_join(., snp_countries, by = "country")%>%
+  left_join(., maus_countries, by = "country")%>%
+  mutate(across(everything(), ~replace_na(., 0)))
+
+country_master%>%
+  filter(!landmark %in% c("Full Data", "Indicative Areas"))
+```
+
+```{r}
+write.csv(country_master, "Processed data/data_breakdown_by_country_apr29.csv", row.names = F)
+```
+
+
+
+
+
+```{r}
+tm_shape(usgs_deposits%>%filter(geounit == "France"))+
+  tm_dots(col = "black")+
+  tm_shape(snp%>%filter(geounit == "France"))+
+  tm_dots(col = "red4")
+
+```
+
+
+
