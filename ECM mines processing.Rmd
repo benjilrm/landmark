@@ -91,7 +91,7 @@ usgs_countries = data.frame(table(usgs_deposits$geounit))%>%
 ```
 Export processed dataset
 ```{r, eval = F}
-st_write(usgs_deposits, "Processed data/usgs_deposits_filtered.gpkg")
+st_write(usgs_deposits, "Processed data/usgs_deposits_filtered.gpkg", delete_dsn = T)
 ```
 
 
@@ -114,7 +114,7 @@ snp_countries = data.frame(table(snp$geounit))%>%
 ```
 Export processed dataset
 ```{r, eval = F}
-st_write(snp, "Processed data/snp_points_filtered.gpkg")
+st_write(snp, "Processed data/snp_points_filtered.gpkg", delete_dsn = T)
 ```
 
 ## Polygons
@@ -152,7 +152,7 @@ maus_countries = data.frame(table(maus_joined$geounit))%>%
 
 Export processed dataset
 ```{r, eval = F}
-st_write(maus_joined, "Processed data/maus_polygons_filtered_joined.gpkg", delete.dsn = T)
+st_write(maus_joined, "Processed data/maus_polygons_filtered_joined.gpkg", delete_dsn = T)
 ```
 
 # Finalise countries
