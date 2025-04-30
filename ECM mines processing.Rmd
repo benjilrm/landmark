@@ -19,7 +19,7 @@ sf_use_s2(FALSE)
 maus_threshold <- 2500 # 2.5 km
 thresh_jas <- 5000 # 5 km
 
-crs = 4326
+crs = "+proj=moll"
 ```
 
 
@@ -32,7 +32,7 @@ Owen et al.
 ```{r}
 owen = read_excel("Raw data/ETM Mines (Owen et al.).xlsx", sheet = 3)
 
-owen_commodities = as.vector(ecm$`ETM list`)
+owen_commodities = as.vector(owen$`ETM list`)
 ```
 
 Sonter et al.
@@ -65,7 +65,7 @@ owen_sonter_comparison = data.frame(
 ```
 
 Export processed data
-```{r}
+```{r, eval = F}
 write.csv(owen_sonter_comparison, "Processed data/owen_sonter_commodity_comparison.csv", row.names = F)
 ```
 
@@ -74,10 +74,7 @@ write.csv(owen_sonter_comparison, "Processed data/owen_sonter_commodity_comparis
 
 First, import boundaries of countries that we will use for spatial joins with ECM deposits, mines, etc.
 ```{r}
-countries = st_transform(ne_countries(scale = "medium"), crs)
-
-countries%>%data.frame()%>%filter(sovereignt == "France")
-#%>%filter(grepl("Franc", subunit))
+countries = st_transform(ne_countries(scale = "medium"), crs)%>%select(geounit)
 ```
 
 
@@ -85,13 +82,18 @@ ECM Deposit point data Downloaded from [USGS](https://www.sciencebase.gov/catalo
 
 Filter for only deposits including commodities in our list of ECM commodities. Filter out any points in the middle of the ocean.
 ```{r}
-usgs_deposits = st_read("Raw data/Global Distribution of Critical Minerals (USGS)/PP1802_CritMin_pts.shp")%>%
+usgs_deposits = st_transform(st_read("Raw data/Global Distribution of Critical Minerals (USGS)/PP1802_CritMin_pts.shp"), crs)%>%
   filter(grepl(paste(owen_sonter_comparison$commodity, collapse = "|"), CRITICAL_M, ignore.case = T) & !grepl("Ocean", LOCATION))%>%
   st_join(., countries, join = st_nearest_feature)
 
 usgs_countries = data.frame(table(usgs_deposits$geounit))%>%
   rename(country = 1, usgs_deposit_points = 2)
 ```
+Export processed dataset
+```{r, eval = F}
+st_write(usgs_deposits, "Processed data/usgs_deposits_filtered.gpkg")
+```
+
 
 # ECM Mines
 
@@ -103,19 +105,22 @@ Filter for mines that are:
 - Operating (Development = "Operating", "Limited Production", "Advanced Production", "Preproduction")
 - Whose list of commodities produced include a commodity in our ECM commodity list above
 ```{r}
-snp = st_read("Raw data/S&P (full)/S&P/MiningAssetsSHP.shp")%>%
+snp = st_transform(st_read("Raw data/S&P (full)/S&P/MiningAssetsSHP.shp"), crs) %>%
   filter(Activity.S == "Active" & Developmen %in% c("Operating", "Limited Production", "Advanced Production", "Preproduction") & grepl(paste(owen_sonter_comparison$commodity, collapse = "|"), `List.of.Co`, ignore.case = T))%>%
   st_join(., countries, join = st_nearest_feature)
 
 snp_countries = data.frame(table(snp$geounit))%>%
   rename(country = 1, snp_points = 2)
 ```
+Export processed dataset
+```{r, eval = F}
+st_write(snp, "Processed data/snp_points_filtered.gpkg")
+```
+
 ## Polygons
 Polygon data of mines obtained from Maus et al.
 ```{r}
-maus = st_read("C:/Users/benji/Downloads/Land_Tenure_Paper-20250428T162244Z-001/Land_Tenure_Paper/Filtered_Mines_Maus_Jasanski.geojson")
-
-maus = st_read("Raw data/Maus et al/Global_Mining_Polygons_v2.shp")
+maus = st_transform(st_read("Raw data/Maus et al/Global_Mining_Polygons_v2.shp"), crs)
 ```
 
 ## Joined
@@ -124,10 +129,11 @@ Join Maus polygons with S&P points
 
 First, get Maus polygons within certain distance from nearest S&P point and record index of each polygon's nearest point
 ```{r}
-within_distance <- st_is_within_distance(maus, snp, dist = maus_threshold)
+maus_buffer = st_filter(st_buffer(maus, maus_threshold), snp, .pred = st_intersects())
 
-maus_filtered <- maus[apply(within_distance, 1, any), ]%>%
-  mutate(id = row_number())
+maus_filtered = maus%>%filter(fid %in% maus_buffer$fid)%>%
+  mutate(id = row_number())%>%
+  select(-fid)
 
 nearest_point_idx <- st_nearest_feature(maus_filtered, snp)
 
@@ -138,11 +144,15 @@ nearest_points <- snp[nearest_point_idx, ]%>%
 Now, we can join the Maus polygons to their nearest points, so that we now have polygons with all columns
 ```{r}
 maus_joined <- maus_filtered %>%
-  left_join(st_drop_geometry(nearest_points), by = "id")%>%
-  st_join(., countries, join = st_nearest_feature)
+  left_join(st_drop_geometry(nearest_points), by = "id")
 
-maus_countries = data.frame(table(maus_joined$country))%>%
+maus_countries = data.frame(table(maus_joined$geounit))%>%
   rename(country = 1, maus_polygons = 2)
+```
+
+Export processed dataset
+```{r, eval = F}
+st_write(maus_joined, "Processed data/maus_polygons_filtered_joined.gpkg", delete.dsn = T)
 ```
 
 # Finalise countries
