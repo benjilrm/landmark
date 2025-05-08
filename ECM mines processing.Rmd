@@ -161,8 +161,8 @@ st_write(maus_joined, "Processed data/maus_polygons_filtered_joined.gpkg", delet
 
 First, generate lists of countries in each dataset
 ```{r}
-mausc = unique(sort(maus_joined$country))
-snpc = unique(sort(snp$country))
+mausc = unique(sort(maus_joined$geounit))
+snpc = unique(sort(snp$geounit))
 mine_c = union(mausc, snpc)
 
 usgsc = unique(sort(usgs_deposits$LOCATION))
@@ -203,7 +203,6 @@ garnett = st_read("Raw data/Garnett et al/IPL_IndigenousPeoplesLands_2017/IPL_20
   left_join(., ne_countries(scale = "medium")%>%st_drop_geometry()%>%select(su_a3, geounit), by = c("Name_" = "su_a3"))
 
 garnett_c = unique(sort(garnett$geounit))
-garnett_c
 ```
 
 
@@ -231,7 +230,7 @@ country_master%>%
 ```
 
 ```{r}
-write.csv(country_master, "Processed data/data_breakdown_by_country_apr29.csv", row.names = F)
+write.csv(country_master, "Processed data/data_breakdown_by_country_apr30.csv", row.names = F)
 ```
 
 

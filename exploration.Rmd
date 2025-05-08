@@ -17,9 +17,11 @@ Set working directory to location of master 'Landmark' folder
 knitr::opts_knit$set(root.dir = "C:/Users/benji/Desktop/Landmark")
 ```
 
-Set tmap defaults
+Settings
 ```{r}
 tmap_mode("plot")
+
+options(scipen=999)
 ```
 
 
@@ -108,22 +110,35 @@ paste("Data from a total of", length(unique(union(community_lands$Country, indic
 ```
 
 ```{r}
-table(community_lands$Identity)
+community_lands%>%
+  mutate(area_ha = as.numeric(st_area(.)/1e8))%>%
+  group_by(Doc_Status)%>%
+  reframe(num_polygons = n(), area_ha = sum(area_ha))
 
-table(community_lands$Form_Rec)
+community_lands%>%
+  mutate(area_ha = as.numeric(st_area(.)/1e8))%>%
+  group_by(Form_Rec)%>%
+  reframe(num_polygons = n(), area_ha = sum(area_ha))
 
-table(community_lands$Doc_Status)
+community_lands%>%
+  mutate(area_ha = as.numeric(st_area(.)/1e8))%>%
+  group_by(Identity)%>%
+  reframe(num_polygons = n(), area_ha = sum(area_ha))
 
-table(community_lands$Category)
+tm_shape(community_lands%>%group_by(Form_Rec)%>%st_union())+
+  tm_polygons()
 ```
 
 To send to Mirja for further looks into possible groupings of categories
 ```{r}
 community_lands_categories = community_lands%>%
+  mutate(area_ha = as.numeric(st_area(.)/1e8))%>%
   group_by(Country, Category, Identity, Form_Rec, Doc_Status)%>%
-  reframe(n = n())%>%
+  reframe(n = n(), area_ha = sum(area_ha))%>%
   arrange(Country)
-write.csv(community_lands_categories, "Raw data/Landmark data/category_by_country.csv", row.names = F)
+
+community_lands_categories
+write.csv(community_lands_categories, "Processed data/category_by_country.csv", row.names = F)
 ```
 Not a lot of variation--vast majority of polygons have recognition status and documented lands. A lot of variation in the 'category' column, which Landmark describes as "The categorical name that the local state gives to this type of indigenous or community land? (e.g., reservation, indigenous territory, customary lands)". Perhaps we could manually sort these into different recognition/documentation groups?
 
