@@ -1,0 +1,131 @@
+
+# Set up
+
+Load packages
+```{r}
+library(tidyverse)
+library(sf)
+library(tmap)
+library(rnaturalearth)
+```
+
+Settings and universal variables
+```{r}
+tmap_mode(mode = "view")
+
+#minimum distance between USGS deposit and nearest mine (to ensure that we are considering unexploited deposits)
+buffer_dist = 100000
+
+crs = 3857
+
+options(scipen=999)
+```
+
+# Import data
+
+List of countries
+```{r}
+countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
+
+countries = as.vector(countries_df%>%filter(landmark %in% c("Full Data", "Indicative areas") & maus_polygons > 0)%>%pull(country))
+```
+
+
+Mine data
+```{r}
+snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)%>%
+  filter(geounit %in% countries)
+
+maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
+  filter(geounit %in% countries)
+```
+ECM deposits
+```{r}
+usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)%>%
+  filter(geounit %in% countries)%>%
+  st_filter(., st_buffer(maus, buffer_dist), .pred = st_disjoint)
+```
+
+Indigenous territories
+```{r}
+landmark_simplified = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "community_landmark_simplified", options = "METHOD=SKIP"), crs)%>%
+  filter(Country %in% countries)%>%
+  rename(geometry = Shape)
+
+landmark2_simp = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "indicative_landmark_simplified", options = "METHOD=SKIP"), crs)%>%
+  filter(Country %in% countries)%>%
+  rename(geometry = Shape)
+
+garnett = st_transform(st_read("Raw data/Garnett et al/IPL_IndigenousPeoplesLands_2017/IPL_2017.shp"), crs)%>%
+  left_join(., ne_countries(scale = "medium")%>%st_drop_geometry()%>%select(geounit, sov_a3), by = c("Name_" = "sov_a3"))%>%
+  filter(geounit %in% countries)%>%
+  select(geometry)%>%
+  mutate(Identity = NA, Doc_Status = NA, Form_Rec = NA)
+
+landmark_full = rbind(landmark_simplified%>%select(Identity:Doc_Status), landmark2_simp%>%select(Identity:Doc_Status), garnett)
+```
+
+```{r}
+landmark_simplified = landmark_simplified%>%
+  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))
+
+landmark_recog = landmark_simplified%>%
+  filter(recognition == 1)
+landmark_no_recog = landmark_simplified%>%
+  filter(recognition == 0)
+```
+
+
+```{r}
+buffer = st_transform(rbind(st_buffer(usgs_deposits, 10000)%>%select(geom), st_buffer(maus, 10000)%>%select(geom)), crs)
+
+sf_use_s2(FALSE)
+
+landmark_full = landmark_full%>%
+  st_filter(., buffer, .pred = st_intersects)
+```
+
+# Distances
+
+Calculate the minimum distance from each Maus polygon and unexploited USGS deposit to the nearest Indigenous/communal territory
+```{r}
+#snp = snp%>%mutate(min_dist_all = apply(st_distance(., landmark_full), 1, min))
+
+maus = maus%>%
+  mutate(min_dist_all = apply(st_distance(., landmark_full), 1, min))
+  
+usgs_deposits = usgs_deposits%>%
+  mutate(min_dist = apply(st_distance(., landmark_full), 1, min))
+```
+
+Now, we can statistically test the differences in distances across these two datasets.
+```{r}
+combined_df <- bind_rows(maus%>%st_drop_geometry() %>%select(min_dist) %>%mutate(source = "ECM Mines"), 
+                         usgs_deposits%>%st_drop_geometry() %>%select(min_dist) %>%mutate(source = "Unexploited ECM Deposits"))%>%
+  filter(min_dist/1000 < 1000)
+
+# wilcoxon test to evaluate if mean distance for mines is less than unexploited deposits
+wilcox.test(min_dist ~ source, data = combined_df, alternative = "less")
+
+# Two-proportion z-test to evaluate if mines are more likely to intersect Indigenous territories
+prop.test(c(sum(maus$min_dist_all == 0), sum(usgs_deposits$min_dist == 0)), c(length(maus$min_dist_all), length(usgs_deposits$min_dist_all)), alternative = "greater")
+
+#Visualise distance distributions
+ggplot(combined_df, aes(x = source, y = min_dist/1000, fill = source)) +
+  geom_violin(trim = FALSE, alpha = 0.5) +
+  #geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white") +
+  #geom_jitter(width = 0.2, alpha = 0.3, size = 1, color = "black") +
+  theme_minimal() +
+  labs(x = "", y = "Distance to Indigenous/Communal Lands (km)") +
+  scale_fill_brewer(palette = "Set2")
+```
+
+
+
+
+
+
+
+
+
+
