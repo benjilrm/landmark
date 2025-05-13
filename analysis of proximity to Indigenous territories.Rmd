@@ -14,9 +14,12 @@ Settings and universal variables
 tmap_mode(mode = "view")
 
 #minimum distance between USGS deposit and nearest mine (to ensure that we are considering unexploited deposits)
-buffer_dist = 100000
+unexploited_dist = 100000 #100km
 
-crs = 3857
+#max distance for cut-off between mines/deposits and Indigenous territories
+dist_threshold = 10000 #10km (from Owen et al., 2022)
+
+crs = 3857 # WGS 84 / Pseudo-Mercator (projected)
 
 options(scipen=999)
 ```
@@ -27,38 +30,51 @@ List of countries
 ```{r}
 countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
 
-countries = as.vector(countries_df%>%filter(landmark %in% c("Full Data", "Indicative areas") & maus_polygons > 0)%>%pull(country))
+countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & maus_polygons > 0)%>%pull(country))
 ```
 
 
 Mine data
 ```{r}
 snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)%>%
-  filter(geounit %in% countries)
+  filter(geounit %in% countries_full)
 
 maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
-  filter(geounit %in% countries)
+  filter(geounit %in% countries_full)
 ```
+
 ECM deposits
 ```{r}
 usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)%>%
-  filter(geounit %in% countries)%>%
-  st_filter(., st_buffer(maus, buffer_dist), .pred = st_disjoint)
+  filter(geounit %in% countries_full)%>%
+  mutate(dist_to_maus = apply(st_distance(., maus), 1, min),
+         dist_to_snp = apply(st_distance(., snp), 1, min),
+         dist_to_mine = pmin(dist_to_maus, dist_to_snp))
+  #st_filter(., st_buffer(maus, unexploited_dist), .pred = st_disjoint)
+  
+usgs_deposits%>%
+  ggplot(aes(dist_to_mine/1000))+
+  geom_histogram(fill = "firebrick4", binwidth = 100)+
+  theme_bw()+
+  labs("Distance to Nearest Mine (km)")
+
+summary(usgs_deposits$dist_to_mine/1000)
 ```
 
 Indigenous territories
 ```{r}
 landmark_simplified = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "community_landmark_simplified", options = "METHOD=SKIP"), crs)%>%
-  filter(Country %in% countries)%>%
-  rename(geometry = Shape)
+  filter(Country %in% countries_full)%>%
+  rename(geometry = Shape)%>%
+  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))
 
 landmark2_simp = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "indicative_landmark_simplified", options = "METHOD=SKIP"), crs)%>%
-  filter(Country %in% countries)%>%
+  filter(Country %in% countries_full)%>%
   rename(geometry = Shape)
 
 garnett = st_transform(st_read("Raw data/Garnett et al/IPL_IndigenousPeoplesLands_2017/IPL_2017.shp"), crs)%>%
   left_join(., ne_countries(scale = "medium")%>%st_drop_geometry()%>%select(geounit, sov_a3), by = c("Name_" = "sov_a3"))%>%
-  filter(geounit %in% countries)%>%
+  filter(geounit %in% countries_full)%>%
   select(geometry)%>%
   mutate(Identity = NA, Doc_Status = NA, Form_Rec = NA)
 
@@ -66,9 +82,6 @@ landmark_full = rbind(landmark_simplified%>%select(Identity:Doc_Status), landmar
 ```
 
 ```{r}
-landmark_simplified = landmark_simplified%>%
-  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))
-
 landmark_recog = landmark_simplified%>%
   filter(recognition == 1)
 landmark_no_recog = landmark_simplified%>%
@@ -77,7 +90,7 @@ landmark_no_recog = landmark_simplified%>%
 
 
 ```{r}
-buffer = st_transform(rbind(st_buffer(usgs_deposits, 10000)%>%select(geom), st_buffer(maus, 10000)%>%select(geom)), crs)
+buffer = st_transform(rbind(st_buffer(usgs_deposits, 1000000)%>%select(geom), st_buffer(maus, 1000000)%>%select(geom)), crs)
 
 sf_use_s2(FALSE)
 
@@ -89,39 +102,106 @@ landmark_full = landmark_full%>%
 
 Calculate the minimum distance from each Maus polygon and unexploited USGS deposit to the nearest Indigenous/communal territory
 ```{r}
-#snp = snp%>%mutate(min_dist_all = apply(st_distance(., landmark_full), 1, min))
+nearest_indices <- st_nearest_feature(snp, landmark_full)
+snp$min_dist_all <- as.numeric(st_distance(snp, landmark_full[nearest_indices, ], by_element = TRUE))
 
-maus = maus%>%
-  mutate(min_dist_all = apply(st_distance(., landmark_full), 1, min))
-  
-usgs_deposits = usgs_deposits%>%
-  mutate(min_dist = apply(st_distance(., landmark_full), 1, min))
+nearest_indices <- st_nearest_feature(maus, landmark_full)
+maus$min_dist_all <- as.numeric(st_distance(maus, landmark_full[nearest_indices, ], by_element = TRUE))
+
+nearest_indices <- st_nearest_feature(usgs_deposits, landmark_full)
+usgs_deposits$min_dist_all <- as.numeric(st_distance(usgs_deposits, landmark_full[nearest_indices, ], by_element = TRUE))
 ```
 
-Now, we can statistically test the differences in distances across these two datasets.
+Distance to recognised and unrecognised territories
 ```{r}
-combined_df <- bind_rows(maus%>%st_drop_geometry() %>%select(min_dist) %>%mutate(source = "ECM Mines"), 
-                         usgs_deposits%>%st_drop_geometry() %>%select(min_dist) %>%mutate(source = "Unexploited ECM Deposits"))%>%
-  filter(min_dist/1000 < 1000)
+nearest_indices <- st_nearest_feature(snp, landmark_recog)
+snp$min_dist_recog <- as.numeric(st_distance(snp, landmark_recog[nearest_indices, ], by_element = TRUE))
 
-# wilcoxon test to evaluate if mean distance for mines is less than unexploited deposits
-wilcox.test(min_dist ~ source, data = combined_df, alternative = "less")
+nearest_indices <- st_nearest_feature(snp, landmark_no_recog)
+snp$min_dist_unrecog <- as.numeric(st_distance(snp, landmark_no_recog[nearest_indices, ], by_element = TRUE))
 
+nearest_indices <- st_nearest_feature(maus, landmark_recog)
+maus$min_dist_recog <- as.numeric(st_distance(maus, landmark_recog[nearest_indices, ], by_element = TRUE))
+
+nearest_indices <- st_nearest_feature(maus, landmark_no_recog)
+maus$min_dist_unrecog <- as.numeric(st_distance(maus, landmark_no_recog[nearest_indices, ], by_element = TRUE))
+
+
+nearest_indices <- st_nearest_feature(usgs_deposits, landmark_recog)
+usgs_deposits$min_dist_recog <- as.numeric(st_distance(usgs_deposits, landmark_recog[nearest_indices, ], by_element = TRUE))
+
+nearest_indices <- st_nearest_feature(usgs_deposits, landmark_no_recog)
+usgs_deposits$min_dist_unrecog <- as.numeric(st_distance(usgs_deposits, landmark_no_recog[nearest_indices, ], by_element = TRUE))
+```
+
+
+Now, we can statistically test the differences in distances across these two datasets. 
+```{r}
+usgs_filtered = usgs_deposits%>%filter(dist_to_mine/1000 > 100)
+
+#versions for both maus and s&p mine datasets
+combined_snp <- bind_rows(snp%>%st_drop_geometry()%>%select(min_dist_all, min_dist_recog, min_dist_unrecog)%>%mutate(source = "ECM Mines"), 
+                         usgs_filtered%>%st_drop_geometry()%>%select(min_dist_all, min_dist_recog, min_dist_unrecog)%>%mutate(source = "Unexploited ECM Deposits"))
+combined_maus <- bind_rows(maus%>%st_drop_geometry()%>%select(min_dist_all, min_dist_recog, min_dist_unrecog)%>%mutate(source = "ECM Mines"), 
+                         usgs_filtered%>%st_drop_geometry()%>%select(min_dist_all, min_dist_recog, min_dist_unrecog)%>%mutate(source = "Unexploited ECM Deposits"))
+```
+
+Wilcoxon test to evaluate if mean distance for mines is less than unexploited deposits
+```{r}
+wilcox.test(min_dist_all ~ source, data = combined_snp, alternative = "less")
+wilcox.test(min_dist_all ~ source, data = combined_maus, alternative = "less")
+
+wilcox.test(min_dist_recog ~ source, data = combined_df, alternative = "less")
+wilcox.test(min_dist_unrecog ~ source, data = combined_df, alternative = "less")
+```
+We don't observe any significant differences, except for unrecognised lands
+
+
+```{r}
 # Two-proportion z-test to evaluate if mines are more likely to intersect Indigenous territories
-prop.test(c(sum(maus$min_dist_all == 0), sum(usgs_deposits$min_dist == 0)), c(length(maus$min_dist_all), length(usgs_deposits$min_dist_all)), alternative = "greater")
+prop.test(c(sum(maus$min_dist_all == 0), sum(usgs_filtered$min_dist_all == 0)), c(length(maus$min_dist_all), length(usgs_filtered$min_dist_all)), alternative = "greater")
+prop.test(c(sum(snp$min_dist_all == 0), sum(usgs_filtered$min_dist_all == 0)), c(length(snp$min_dist_all), length(usgs_filtered$min_dist_all)), alternative = "greater")
+prop.test(c(sum(snp$min_dist_unrecog == 0), sum(usgs_filtered$min_dist_unrecog == 0)), c(length(snp$min_dist_unrecog), length(usgs_filtered$min_dist_unrecog)), alternative = "greater")
 
+wilcox.test(snp$min_dist_unrecog, snp$min_dist_recog, alternative = "greater")
+prop.test(c(sum(snp$min_dist_unrecog == 0), sum(snp$min_dist_recog == 0)), c(length(snp$min_dist_unrecog), length(usgs_filtered$min_dist_unrecog)), alternative = "greater")
+```
+
+```{r}
 #Visualise distance distributions
-ggplot(combined_df, aes(x = source, y = min_dist/1000, fill = source)) +
-  geom_violin(trim = FALSE, alpha = 0.5) +
-  #geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white") +
-  #geom_jitter(width = 0.2, alpha = 0.3, size = 1, color = "black") +
+ggplot(combined_df, aes(x = source, y = min_dist_all, fill = source)) +
+  geom_violin(trim = T, alpha = 0.5) +
   theme_minimal() +
-  labs(x = "", y = "Distance to Indigenous/Communal Lands (km)") +
+  labs(x = "", y = "Distance to Indigenous/Communal Territories (km)", fill = "") +
+  scale_fill_brewer(palette = "Set2")
+
+ggplot(combined_df, aes(x = min_dist_all/1000, fill = source)) +
+  geom_density(alpha = 0.4) +
+  theme_minimal() +
+  labs(x = "Distance to Indigenous/Communal Territories (km)", y = "Frequency", fill = "") +
+  scale_fill_brewer(palette = "Set2")
+
+ggplot(combined_df, aes(x = source, y = min_dist_all/1000, fill = source)) +
+  geom_boxplot(alpha = 0.5) +
+  theme_minimal() +
+  labs(x = "", y = "Distance to Indigenous/Communal Territories (km)", fill = "") +
+  scale_fill_brewer(palette = "Set2")
+```
+```{r}
+#Visualise distance distributions
+ggplot(combined_df, aes(x = source, y = min_dist_unrecog, fill = source)) +
+  geom_violin(trim = T, alpha = 0.5) +
+  theme_minimal() +
+  labs(x = "", y = "Distance to Indigenous/Communal Territories (km)", fill = "") +
   scale_fill_brewer(palette = "Set2")
 ```
 
 
 
+
+```{r}
+
+```
 
 
 
