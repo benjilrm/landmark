@@ -3,11 +3,15 @@
 
 Load packages
 ```{r}
-library(tidyverse)
-library(sf)
-library(tmap)
-library(rnaturalearth)
-library(terra)
+library(sf)          # Spatial data
+library(terra)       # Raster processing  
+library(spsurvey)    # Spatially balanced sampling
+library(MatchIt)     # Matching
+library(cobalt)      # Balance checking
+library(tidyverse)       # Data wrangling
+library(exactextractr) # Zonal stats
+library(rnaturalearth) # Country boundaries
+library(tmap)        # Making maps
 ```
 
 Settings and universal variables
@@ -20,6 +24,35 @@ options(scipen=999)
 ```
 
 # Import data
+
+
+## Study area
+
+List of countries
+```{r}
+countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
+
+countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & maus_polygons > 0)%>%pull(country))
+
+countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & maus_polygons > 0)%>%pull(country))
+```
+
+USGS ECM deposits
+```{r}
+usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)%>%
+  filter(geounit %in% countries_full)%>%
+  mutate(dist_to_maus = apply(st_distance(., maus), 1, min),
+         dist_to_snp = apply(st_distance(., snp), 1, min),
+         dist_to_mine = pmin(dist_to_maus, dist_to_snp),
+         id = row_number())
+```
+
+Define study area (100km around deposits)
+```{r}
+deposit_buffers = st_buffer(deposits, dist = 100000) %>%  # 100km buffer
+  st_union() %>% 
+  st_as_sf()
+```
 
 ## Covariates
 
@@ -52,4 +85,150 @@ Population Density
 pop_dens = rast("Raw data/Covariates/Population density/gpw_v4_population_density_rev11_2020_30_sec_2020.tif")
 ```
 
+## Independent variable
+```{r}
+landmark_simplified = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "community_landmark_simplified", options = "METHOD=SKIP"), crs)%>%
+  filter(Country %in% countries_full)%>%
+  rename(geometry = Shape)%>%
+  st_filter(., buffer, .pred = st_intersects)%>%
+  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))
+```
+
+## Dependent variable
+```{r}
+snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)%>%
+  filter(geounit %in% countries_full)
+
+maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
+  filter(geounit %in% countries_full)
+```
+
+
+# Generate spatially balanced points
+
+Option A: Stratified by mine proximity (using spsurvey)
+```{r}
+deposit_buffers$stratum = ifelse(
+  st_distance(deposit_buffers, mines) <= 10000, 1, 0  # 10km threshold
+)
+
+set.seed(42)
+samples = grts(
+  sf_object = deposit_buffers,
+  n_base = c(1000, 1000),  # Adjust based on your needs
+  stratum_var = "stratum"
+)
+sampled_points = st_as_sf(samples$sites_base)
+```
+
+Option B: Halton sequence (uniform random)
+```{r, eval = F}
+sampled_points = st_halton(2000, crs = st_crs(deposit_buffers)) %>%
+  st_as_sf() %>%
+  st_intersection(deposit_buffers)
+```
+
+# Extract covariates
+```{r}
+# Continuous variables
+sampled_points = sampled_points %>%
+  mutate(
+    road_density = extract(road_density, vect(.))[,2],
+    pop_density = extract(pop_density, vect(.))[,2],
+    dist_water = extract(dist_water, vect(.))[,2],
+    near_mine = st_distance(., mines) <= 10000
+  )
+
+# Land cover classification
+lc_reclass = classify(landcover, 
+  matrix(c(10,1, 20,2, 30,2), ncol=2, byrow=TRUE))
+
+sampled_points$forest_cover = extract(
+  lc_reclass == 1, vect(sampled_points), buffer=1000, fun=mean, na.rm=TRUE
+)[,2]
+
+sampled_points$farmland_cover = extract(
+  lc_reclass == 2, vect(sampled_points), buffer=1000, fun=mean, na.rm=TRUE
+)[,2]
+
+# Protected areas
+sampled_points$protected = as.numeric(
+  st_intersects(sampled_points, protected_areas, sparse=FALSE)
+)
+
+# Add country info
+sampled_points = st_join(sampled_points, countries)
+```
+
+# Matching
+
+```{r}
+# Define treatment variables
+sampled_points = sampled_points %>%
+  mutate(
+    indigenous = as.numeric(st_intersects(., indigenous_lands, sparse=FALSE)),
+    recognized = as.numeric(st_intersects(., recognized_lands, sparse=FALSE))
+  )
+
+# Create control pool
+control_pool = filter(sampled_points, indigenous == 0)
+```
+
+```{r}
+match_recog = matchit(
+  recognized ~ road_density + pop_density + dist_water +
+               forest_cover + farmland_cover + protected,
+  data = bind_rows(
+    filter(sampled_points, recognized == 1),
+    control_pool
+  ),
+  method = "nearest",
+  exact = ~ country,
+  caliper = 0.2,
+  ratio = 3
+)
+
+matched_recog = match.data(match_recog)
+```
+
+Balance checking
+```{r}
+# Recognized lands balance
+bal.tab(match_recog, stats = c("mean.diffs", "ks.statistics"))
+love.plot(match_recog, threshold = 0.1, abs = TRUE)
+
+# Non-recognized lands balance  
+bal.tab(match_nonrecog, stats = c("mean.diffs", "ks.statistics"))
+love.plot(match_nonrecog, threshold = 0.1, abs = TRUE)
+```
+
+# Analysis
+```{r}
+# Add outcome variable
+matched_recog = matched_recog %>%
+  mutate(mine_outcome = as.numeric(near_mine))
+
+matched_nonrecog = matched_nonrecog %>%
+  mutate(mine_outcome = as.numeric(near_mine))
+
+# Recognized lands model
+model_recog = glm(
+  mine_outcome ~ recognized + road_density + pop_density +
+                forest_cover + farmland_cover + factor(country),
+  data = matched_recog,
+  family = binomial()
+)
+
+# Non-recognized lands model
+model_nonrecog = glm(
+  mine_outcome ~ indigenous + road_density + pop_density +
+                forest_cover + farmland_cover + factor(country), 
+  data = matched_nonrecog,
+  family = binomial()
+)
+
+# Compare results
+summary(model_recog)
+summary(model_nonrecog)
+```
 
