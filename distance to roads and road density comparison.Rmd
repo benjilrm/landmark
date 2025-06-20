@@ -1,0 +1,87 @@
+
+# Import packages
+```{r}
+library(sf)          # for vector data
+library(terra)       # for raster data
+library(exactextractr) # for fast extraction
+library(ggplot2)     # for visualization
+library(dplyr)       # for data wrangling
+```
+
+# Calculating distance to roads
+
+## Distance to roads function
+```{r}
+create_distance_to_roads_raster = function(road_vector_path, 
+                                         road_density_raster_path, 
+                                         output_path) {
+  # Load the road density raster to get its properties
+  road_density = rast(road_density_raster_path)
+  
+  # Load the road vector data
+  roads = st_read(road_vector_path, quiet = TRUE)
+  
+  # Ensure roads are in same CRS as raster
+  roads = st_transform(roads, crs(road_density))
+  
+  # Create a blank raster with the same properties as road density
+  template = rast(road_density)
+  values(template) = NA
+  
+  # Rasterize the roads (1 for roads, NA for non-roads)
+  road_raster = rasterize(roads, template, field = 1, background = NA)
+  
+  # Calculate distance to nearest road (in meters if CRS is projected)
+  distance_raster = distance(road_raster, target = NA)
+  
+  # Write the output raster
+  writeRaster(distance_raster, output_path, overwrite = TRUE)
+  
+  message(paste("Distance to roads raster saved to", output_path))
+  
+  return(distance_raster)
+}
+```
+
+## Implementing
+```{r}
+# Replace these paths with your actual file paths
+road_vector_file = "path/to/your/roads.gpkg"  # or .shp
+road_density_raster = "path/to/your/road_density.tif"
+output_distance_raster = "path/to/output/distance_to_roads.tif"
+
+# Generate the distance raster
+distance_raster = create_distance_to_roads_raster(
+  road_vector_file, 
+  road_density_raster, 
+  output_distance_raster
+)
+```
+
+# Compare to road density
+```{r}
+# Compare with road density for correlation check
+road_density = rast(road_density_raster)
+
+# Sample random points to compare
+sample_points = spatSample(road_density, size = 1000, as.points = TRUE)
+sample_values = extract(road_density, sample_points)
+sample_values$distance = extract(distance_raster, sample_points)[,2]
+
+# Calculate correlation
+correlation = cor(sample_values[,1], sample_values$distance, 
+                 use = "complete.obs", method = "spearman")
+
+message(paste("Spearman correlation between road density and distance to roads:", 
+            round(correlation, 3)))
+
+# Plot the relationship
+ggplot(sample_values, aes(x = .data[[names(sample_values)[1]]], y = distance)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "gam") +
+  labs(x = "Road Density", y = "Distance to Road (m)",
+       title = paste("Road Density vs Distance to Road\nSpearman ρ =", 
+                    round(correlation, 3))) +
+  theme_minimal()
+```
+
