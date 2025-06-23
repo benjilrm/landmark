@@ -199,9 +199,8 @@ wilcox.test(min_dist_unrecog ~ source, data = combined_maus, alternative = "less
 ```
 We don't observe any significant differences, except for unrecognised lands (both S&P and Maus) and recognised lands (Maus)
 
-
+Two-proportion z-test to evaluate if mines are more likely to intersect Indigenous territories
 ```{r}
-# Two-proportion z-test to evaluate if mines are more likely to intersect Indigenous territories
 prop.test(c(sum(snp$min_dist_all == 0), sum(usgs_filtered$min_dist_all == 0)), c(length(snp$min_dist_all), length(usgs_filtered$min_dist_all)), alternative = "greater")
 prop.test(c(sum(maus$min_dist_all == 0), sum(usgs_filtered$min_dist_all == 0)), c(length(maus$min_dist_all), length(usgs_filtered$min_dist_all)), alternative = "greater")
 
