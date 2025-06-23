@@ -6,82 +6,96 @@ library(terra)       # for raster data
 library(exactextractr) # for fast extraction
 library(ggplot2)     # for visualization
 library(dplyr)       # for data wrangling
+library(rnaturalearth)
+library(tmap)
 ```
+
+```{r}
+crs = 32721
+rast_crs = paste("EPSG:", crs, sep = "")
+
+tmap_mode("view")
+```
+
+
+# Import data
+```{r}
+bolivia = st_transform(ne_countries(country = "Bolivia", scale = "medium", returnclass = "sf"), crs)%>%vect()
+
+road_vector = st_transform(st_read("Raw data/Covariates/Road access/OSM Bolivia (test)/gis_osm_roads_free_1.shp"), crs)
+
+#road_v_sa = st_transform(st_read("Raw data/Covariates/Road access/GRIP4_Region2_vector_shp/GRIP4_region2.shp"), crs)%>%
+  #st_filter(., bolivia, .pred = st_intersects())
+
+road_density_raster = rast("Raw data/Covariates/Road access/GRIP4_density_total/grip4_total_dens_m_km2.asc")%>%
+  project(rast_crs)%>%
+  crop(bolivia)%>%
+  mask(bolivia)
+
+# 2. Create binary road mask (1=road, NA=no road)
+road_mask <- classify(road_density_raster, 
+                     rcl = matrix(c(0, NA, 
+                                   0.0001, Inf, 1), 
+                                 ncol = 2, byrow = TRUE), 
+                     right = FALSE)
+                     
+distance_raster_mask <- distance(road_mask)%>%
+  mask(bolivia)
+```
+
 
 # Calculating distance to roads
 
 ## Distance to roads function
 ```{r}
-create_distance_to_roads_raster = function(road_vector_path, 
-                                         road_density_raster_path, 
-                                         output_path) {
-  # Load the road density raster to get its properties
-  road_density = rast(road_density_raster_path)
-  
-  # Load the road vector data
-  roads = st_read(road_vector_path, quiet = TRUE)
-  
-  # Ensure roads are in same CRS as raster
-  roads = st_transform(roads, crs(road_density))
-  
+create_distance_to_roads_raster = function(roads, 
+                                         road_density) {
+
   # Create a blank raster with the same properties as road density
-  template = rast(road_density)
-  values(template) = NA
+  template = rast(road_mask)
   
   # Rasterize the roads (1 for roads, NA for non-roads)
-  road_raster = rasterize(roads, template, field = 1, background = NA)
+  road_raster <- rasterize(roads, template, field=1, background=NA)
   
   # Calculate distance to nearest road (in meters if CRS is projected)
-  distance_raster = distance(road_raster, target = NA)
+  distance_raster = distance(road_raster)%>%
+    mask(bolivia)
   
-  # Write the output raster
-  writeRaster(distance_raster, output_path, overwrite = TRUE)
-  
-  message(paste("Distance to roads raster saved to", output_path))
-  
-  return(distance_raster)
-}
+  return(distance_raster)}
 ```
 
 ## Implementing
 ```{r}
-# Replace these paths with your actual file paths
-road_vector_file = "path/to/your/roads.gpkg"  # or .shp
-road_density_raster = "path/to/your/road_density.tif"
-output_distance_raster = "path/to/output/distance_to_roads.tif"
-
 # Generate the distance raster
-distance_raster = create_distance_to_roads_raster(
-  road_vector_file, 
-  road_density_raster, 
-  output_distance_raster
-)
+distance_raster = create_distance_to_roads_raster(road_vector, road_density_raster)
 ```
 
-# Compare to road density
+# Map Comparison
 ```{r}
-# Compare with road density for correlation check
-road_density = rast(road_density_raster)
+my_breaks <- c(0, 10000, 20000, 30000, 40000, 50000)
 
-# Sample random points to compare
-sample_points = spatSample(road_density, size = 1000, as.points = TRUE)
-sample_values = extract(road_density, sample_points)
-sample_values$distance = extract(distance_raster, sample_points)[,2]
+tm_shape(distance_raster)+
+  tm_raster(style = "fixed", breaks = my_breaks)+
 
-# Calculate correlation
-correlation = cor(sample_values[,1], sample_values$distance, 
-                 use = "complete.obs", method = "spearman")
+tm_shape(distance_raster_mask) +
+  tm_raster(style = "fixed", breaks = my_breaks)
 
-message(paste("Spearman correlation between road density and distance to roads:", 
-            round(correlation, 3)))
+tm_shape(road_density_raster)+
+  tm_raster(style = "fisher")
 
-# Plot the relationship
-ggplot(sample_values, aes(x = .data[[names(sample_values)[1]]], y = distance)) +
-  geom_point(alpha = 0.3) +
-  geom_smooth(method = "gam") +
-  labs(x = "Road Density", y = "Distance to Road (m)",
-       title = paste("Road Density vs Distance to Road\nSpearman ρ =", 
-                    round(correlation, 3))) +
-  theme_minimal()
+diff_raster <- distance_raster - distance_raster_mask
+plot(diff_raster, main = "Error in Approximation (m)")
 ```
+```{r}
+# Create sample points for validation (10,000 stratified random points)
+set.seed(123)
+
+vals <- spatSample(c(distance_raster, distance_raster_mask), 10000, method="random")
+vals <- na.omit(vals)
+
+cor(vals[,1], vals[,2])^2
+```
+
+
+
 
