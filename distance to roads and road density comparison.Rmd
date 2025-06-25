@@ -8,6 +8,7 @@ library(ggplot2)     # for visualization
 library(dplyr)       # for data wrangling
 library(rnaturalearth)
 library(tmap)
+library(leaflet)
 ```
 
 ```{r}
@@ -76,9 +77,26 @@ my_breaks <- c(0, 10000, 20000, 30000, 40000, 50000)
 
 tm_shape(distance_raster)+
   tm_raster(style = "fixed", breaks = my_breaks)+
-
-tm_shape(distance_raster_mask) +
+  tm_shape(distance_raster_mask) +
   tm_raster(style = "fixed", breaks = my_breaks)
+
+
+pal <- colorBin(
+  palette = c("#2b83ba", "#80bfac", "#d5eea0", "#ffffbf", 
+              "#fdc980", "#f88d51", "#d7191c"),
+  domain = my_breaks,
+  bins = my_breaks,
+  na.color = "transparent"
+)
+
+leaflet() %>%
+  addTiles() %>%
+  addRasterImage(distance_raster, color = pal, group = "'True' Distance") %>%
+  addRasterImage(distance_raster_mask, color = pal, group = "Distance Derived from Density") %>%
+  addLegend(pal = pal, values = values(distance_raster), title = "Distance", position = "bottomright")%>%
+  addLayersControl(
+    overlayGroups = c("'True' Distance", "Distance Derived from Density"),
+    options = layersControlOptions(collapsed = FALSE))
 
 tm_shape(road_density_raster)+
   tm_raster(style = "fisher")
