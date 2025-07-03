@@ -37,21 +37,10 @@ countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "
 countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & maus_polygons > 0)%>%pull(country))
 ```
 
-USGS ECM deposits
-```{r}
-usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)%>%
-  filter(geounit %in% countries_full)%>%
-  mutate(dist_to_maus = apply(st_distance(., maus), 1, min),
-         dist_to_snp = apply(st_distance(., snp), 1, min),
-         dist_to_mine = pmin(dist_to_maus, dist_to_snp),
-         id = row_number())
-```
 
-Define study area (100km around deposits)
+Define study area (based on adm1)
 ```{r}
-deposit_buffers = st_buffer(deposits, dist = 100000) %>%  # 100km buffer
-  st_union() %>% 
-  st_as_sf()
+#NEED TO GET LIST OF ADM1 WHERE THERE ARE MULTIPLE MINES AND WE HAVE RECOGNITION DATA
 ```
 
 ## Covariates
@@ -60,6 +49,7 @@ Road density
 ```{r}
 road_density = rast("Raw data/Covariates/Road access/GRIP4_density_total/grip4_total_dens_m_km2.asc")
 ```
+
 Distance to water
 ```{r}
 dist_to_water = rast("Raw data/Covariates/Distance to water/distance_to_water.tif")
@@ -80,10 +70,23 @@ Land cover
 land_cover = rast("Raw data/Covariates/Land cover/MCD12C1.A2023001.061.2024251212901.hdf")
 ```
 
+
+USGS ECM deposits
+```{r}
+usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)%>%
+  filter(geounit %in% countries_full)
+```
+
 Population Density
 ```{r}
 pop_dens = rast("Raw data/Covariates/Population density/gpw_v4_population_density_rev11_2020_30_sec_2020.tif")
 ```
+
+Administrative division (adm1) & country
+```{r}
+
+```
+
 
 ## Independent variable
 ```{r}
@@ -129,6 +132,8 @@ sampled_points = st_halton(2000, crs = st_crs(deposit_buffers)) %>%
 ```
 
 # Extract covariates
+
+NEED TO CALCULATE DISTANCE TO NEAREST USGS DEPOSIT POINT
 ```{r}
 # Continuous variables
 sampled_points = sampled_points %>%
@@ -136,25 +141,21 @@ sampled_points = sampled_points %>%
     road_density = extract(road_density, vect(.))[,2],
     pop_density = extract(pop_density, vect(.))[,2],
     dist_water = extract(dist_water, vect(.))[,2],
-    near_mine = st_distance(., mines) <= 10000
-  )
+    near_mine = st_distance(., mines) <= 10000)
 
 # Land cover classification
 lc_reclass = classify(landcover, 
   matrix(c(10,1, 20,2, 30,2), ncol=2, byrow=TRUE))
 
 sampled_points$forest_cover = extract(
-  lc_reclass == 1, vect(sampled_points), buffer=1000, fun=mean, na.rm=TRUE
-)[,2]
+  lc_reclass == 1, vect(sampled_points), buffer=1000, fun=mean, na.rm=TRUE)[,2]
 
 sampled_points$farmland_cover = extract(
-  lc_reclass == 2, vect(sampled_points), buffer=1000, fun=mean, na.rm=TRUE
-)[,2]
+  lc_reclass == 2, vect(sampled_points), buffer=1000, fun=mean, na.rm=TRUE)[,2]
 
 # Protected areas
 sampled_points$protected = as.numeric(
-  st_intersects(sampled_points, protected_areas, sparse=FALSE)
-)
+  st_intersects(sampled_points, protected_areas, sparse=FALSE))
 
 # Add country info
 sampled_points = st_join(sampled_points, countries)
