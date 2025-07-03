@@ -113,4 +113,12 @@ connectivity <- log(road_density_raster + 0.001)
 tm_shape(connectivity)+
   tm_raster()
 ```
+Similar: 1/road density
+```{r}
+inverse_density = 1/road_density_raster
+
+tm_shape(inverse_density)+
+  tm_raster()
+```
+
 
