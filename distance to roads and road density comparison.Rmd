@@ -25,85 +25,75 @@ bolivia = st_transform(ne_countries(country = "Bolivia", scale = "medium", retur
 
 road_vector = st_transform(st_read("Raw data/Covariates/Road access/OSM Bolivia (test)/gis_osm_roads_free_1.shp"), crs)
 
-#road_v_sa = st_transform(st_read("Raw data/Covariates/Road access/GRIP4_Region2_vector_shp/GRIP4_region2.shp"), crs)%>%
-  #st_filter(., bolivia, .pred = st_intersects())
-
 road_density_raster = rast("Raw data/Covariates/Road access/GRIP4_density_total/grip4_total_dens_m_km2.asc")%>%
   project(rast_crs)%>%
   crop(bolivia)%>%
   mask(bolivia)
 
-# 2. Create binary road mask (1=road, NA=no road)
+tm_shape(road_density_raster)+
+  tm_raster()
+```
+
+
+
+
+# Distance to roads
+
+## Based on road density raster
+
+Create binary road mask (1 = road, NA = no road) from road density raster.
+Then calculate distance to roads based on that binary road mask
+```{r}
 road_mask <- classify(road_density_raster, 
                      rcl = matrix(c(0, NA, 
                                    0.0001, Inf, 1), 
                                  ncol = 2, byrow = TRUE), 
                      right = FALSE)
                      
-distance_raster_mask <- distance(road_mask)%>%
+distance_raster_from_density <- distance(road_mask)%>%
   mask(bolivia)
 ```
 
+## Based on road vectors
 
-# Calculating distance to roads
-
-## Distance to roads function
+Generating distance to roads raster from road vector sf
 ```{r}
-create_distance_to_roads_raster = function(roads, 
-                                         road_density) {
-
-  # Create a blank raster with the same properties as road density
-  template = rast(road_mask)
+# Create a blank raster with the same properties as road density
+template = rast(road_mask)
   
-  # Rasterize the roads (1 for roads, NA for non-roads)
-  road_raster <- rasterize(roads, template, field=1, background=NA)
+# Rasterize the roads (1 for roads, NA for non-roads)
+roads_rasterised <- rasterize(road_vector, template, field=1, background=0)
   
-  # Calculate distance to nearest road (in meters if CRS is projected)
-  distance_raster = distance(road_raster)%>%
-    mask(bolivia)
-  
-  return(distance_raster)}
+# Calculate distance to nearest road (in meters if CRS is projected)
+distance_raster_from_vector = distance(roads_rasterised)%>%
+  mask(bolivia)
 ```
 
-## Implementing
-```{r}
-# Generate the distance raster
-distance_raster = create_distance_to_roads_raster(road_vector, road_density_raster)
-```
-
-# Map Comparison
+## Map Comparison
 ```{r}
 my_breaks <- c(0, 10000, 20000, 30000, 40000, 50000)
 
-tm_shape(distance_raster)+
-  tm_raster(style = "fixed", breaks = my_breaks)+
-  tm_shape(distance_raster_mask) +
-  tm_raster(style = "fixed", breaks = my_breaks)
-
-
 pal <- colorBin(
-  palette = c("#2b83ba", "#80bfac", "#d5eea0", "#ffffbf", 
-              "#fdc980", "#f88d51", "#d7191c"),
+  palette = c("#2b83ba", "#80bfac", "#d5eea0", "#ffffbf", "#fdc980", "#f88d51", "#d7191c"),
   domain = my_breaks,
   bins = my_breaks,
-  na.color = "transparent"
-)
+  na.color = "transparent")
 
 leaflet() %>%
   addTiles() %>%
-  addRasterImage(distance_raster, color = pal, group = "'True' Distance") %>%
-  addRasterImage(distance_raster_mask, color = pal, group = "Distance Derived from Density") %>%
-  addLegend(pal = pal, values = values(distance_raster), title = "Distance", position = "bottomright")%>%
+  addRasterImage(distance_raster_from_vector, color = pal, group = "Distance Derived from Road Vector") %>%
+  addRasterImage(distance_raster_from_density, color = pal, group = "Distance Derived from Density") %>%
+  addLegend(pal = pal, values = values(distance_raster_from_vector), title = "Distance", position = "bottomright")%>%
   addLayersControl(
-    overlayGroups = c("'True' Distance", "Distance Derived from Density"),
+    overlayGroups = c("Distance Derived from Road Vector", "Distance Derived from Density"),
     options = layersControlOptions(collapsed = FALSE))
 
-tm_shape(road_density_raster)+
-  tm_raster(style = "fisher")
-
 diff_raster <- distance_raster - distance_raster_mask
-plot(diff_raster, main = "Error in Approximation (m)")
+plot(diff_raster, main = "Difference (m)")
 ```
+
+
+
 ```{r}
 # Create sample points for validation (10,000 stratified random points)
 set.seed(123)
@@ -114,6 +104,13 @@ vals <- na.omit(vals)
 cor(vals[,1], vals[,2])^2
 ```
 
+# Alternative metrics
 
+Alternative metric idea: take log of road density so we compress high urban density while stretching rural variation
+```{r}
+connectivity <- log(road_density_raster + 0.001)
 
+tm_shape(connectivity)+
+  tm_raster()
+```
 
