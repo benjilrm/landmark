@@ -18,12 +18,26 @@ Settings and universal variables
 ```{r}
 tmap_mode(mode = "view")
 
-crs = 3857 # WGS 84 / Pseudo-Mercator (projected)
+crs = 4326
+crs_dist = 8857
 
 options(scipen=999)
 ```
 
 # Import data
+
+
+
+
+## Dependent variable
+```{r}
+snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)%>%
+  filter(geounit %in% countries_full)
+
+maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
+  filter(geounit %in% countries_full)%>%
+  st_make_valid()
+```
 
 
 ## Study area
@@ -32,22 +46,44 @@ List of countries
 ```{r}
 countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
 
-countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & maus_polygons > 0)%>%pull(country))
+countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
 
-countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & maus_polygons > 0)%>%pull(country))
+countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
 ```
 
 
 Define study area (based on adm1)
 ```{r}
-#NEED TO GET LIST OF ADM1 WHERE THERE ARE MULTIPLE MINES AND WE HAVE RECOGNITION DATA
+adm1s_full <- st_transform(ne_download(scale = 10, type = "states", category = "cultural", returnclass = "sf"), crs)%>%
+  filter(admin %in% countries_full)%>%
+  st_make_valid()
+
+adm1_recog = adm1s_full%>%
+  filter(admin %in% countries_recog)
+  
+study_area_adm1s_full = adm1s_full%>%
+  filter(lengths(st_intersects(., maus)) > 0 | 
+         lengths(st_contains(., snp)) > 0)
+```
+
+## Independent variable
+```{r}
+landmark_simplified = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "community_landmark_simplified", options = "METHOD=SKIP"), crs)%>%
+  filter(Country %in% countries_full)%>%
+  rename(geometry = Shape)%>%
+  st_filter(., study_area_adm1s_full, .pred = st_intersects)%>%
+  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))
+
+study_area_adm1s_full = study_area_adm1s_full%>%
+  st_filter(., landmark_simplified, .pred = st_intersects())
 ```
 
 ## Covariates
 
 Road density
 ```{r}
-road_density = rast("Raw data/Covariates/Road access/GRIP4_density_total/grip4_total_dens_m_km2.asc")
+road_density_raw = rast("Raw data/Covariates/Road access/GRIP4_density_total/grip4_total_dens_m_km2.asc")
+road_density = log(road_density_raw + 0.001)
 ```
 
 Distance to water
@@ -57,17 +93,27 @@ dist_to_water = rast("Raw data/Covariates/Distance to water/distance_to_water.ti
 
 Nightlights
 ```{r}
-nightlights = rast("Raw data/Covariates/Nightlights/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif")
+#nightlights = rast("Raw data/Covariates/Nightlights/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif")
 ```
 
 Protected areas
 ```{r}
-protected_areas = st_read("Raw data/Covariates/Protected areas/WDPA_WDOECM_May2025_Public_all/WDPA_WDOECM_May2025_Public_all.gdb", layer = "WDPA_WDOECM_poly_May2025_all")
+protected_areas = st_read("Raw data/Covariates/Protected areas/WDPA_WDOECM_May2025_Public_all/WDPA_WDOECM_May2025_Public_all.gdb", layer = "WDPA_WDOECM_poly_May2025_all")%>%
+  st_filter(., study_area_adm1s_full, .pred = st_intersects())
 ```
 
 Land cover
 ```{r}
-land_cover = rast("Raw data/Covariates/Land cover/MCD12C1.A2023001.061.2024251212901.hdf")
+land_cover_path = "Raw data/Covariates/Land cover/MCD12C1.A2023001.061.2024251212901.hdf"
+gdal_subdatasets(land_cover_path)
+
+land_cover = rast(land_cover_path, subds = "Majority_Land_Cover_Type_1")
+
+forest_binary = as.numeric(land_cover %in% 1:5)  # Classes 1-5 are forest types (Evergreen Needleleaf to Mixed Forests)
+cropland_binary = as.numeric(land_cover %in% c(12,14)) # Class 12 is cropland, 14 is cropland mosaic
+
+plot(forest_binary)
+plot(cropland_binary)
 ```
 
 
@@ -80,30 +126,6 @@ usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg
 Population Density
 ```{r}
 pop_dens = rast("Raw data/Covariates/Population density/gpw_v4_population_density_rev11_2020_30_sec_2020.tif")
-```
-
-Administrative division (adm1) & country
-```{r}
-
-```
-
-
-## Independent variable
-```{r}
-landmark_simplified = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "community_landmark_simplified", options = "METHOD=SKIP"), crs)%>%
-  filter(Country %in% countries_full)%>%
-  rename(geometry = Shape)%>%
-  st_filter(., buffer, .pred = st_intersects)%>%
-  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))
-```
-
-## Dependent variable
-```{r}
-snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)%>%
-  filter(geounit %in% countries_full)
-
-maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
-  filter(geounit %in% countries_full)
 ```
 
 
