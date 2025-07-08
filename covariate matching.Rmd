@@ -27,7 +27,14 @@ options(scipen=999)
 # Import data
 
 
+## List of countries for analysis
+```{r}
+countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
 
+countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
+
+countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
+```
 
 ## Dependent variable
 ```{r}
@@ -42,17 +49,7 @@ maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg")
 
 ## Study area
 
-List of countries
-```{r}
-countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
-
-countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
-
-countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
-```
-
-
-Define study area (based on adm1)
+Define study area (based on adm1). We only want administrative areas that have at least one mine and one Indigenous territory, for both all territories and territories for which we have recognition data.
 ```{r}
 adm1s_full <- st_transform(ne_download(scale = 10, type = "states", category = "cultural", returnclass = "sf"), crs)%>%
   filter(admin %in% countries_full)%>%
@@ -64,18 +61,42 @@ adm1_recog = adm1s_full%>%
 study_area_adm1s_full = adm1s_full%>%
   filter(lengths(st_intersects(., maus)) > 0 | 
          lengths(st_contains(., snp)) > 0)
+
+study_area_adm1s_recog = adm1_recog%>%
+  filter(lengths(st_intersects(., maus)) > 0 | 
+         lengths(st_contains(., snp)) > 0)
+```
+
+We were unable to filter for areas that intersected with our Indigenous territories layer due to invalid geometries in that layer. We did this in ArcGIS Pro instead (see 'landmark_arcgis') and import back our study area of administrative areas.
+```{r}
+st_write(study_area_adm1s_full, "Processed data/Study area/study_area_adm1s_full_mines.shp")
+st_write(study_area_adm1s_recog, "Processed data/Study area/study_area_adm1s_recog_mines.shp")
+
+rm(adm1s_full)
+rm(adm1_recog)
+
+study_area_adm1s_recog = st_read("Processed data/Landmark processed/landmark_recog_clipped_study_area.shp")
 ```
 
 ## Independent variable
 ```{r}
-landmark_simplified = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "community_landmark_simplified", options = "METHOD=SKIP"), crs)%>%
+sf_use_s2(FALSE)
+
+st_layers("C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb")
+
+landmark = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "community_landmark_singlepart"), crs)%>%
   filter(Country %in% countries_full)%>%
   rename(geometry = Shape)%>%
-  st_filter(., study_area_adm1s_full, .pred = st_intersects)%>%
-  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))
+  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))%>%
+  st_make_valid()   
+
+landmark = landmark%>%
+  st_filter(., study_area_adm1s_full, .pred = st_intersects)
 
 study_area_adm1s_full = study_area_adm1s_full%>%
-  st_filter(., landmark_simplified, .pred = st_intersects())
+  st_filter(., landmark, .pred = st_intersects())
+
+sf_use_s2(TRUE)
 ```
 
 ## Covariates
