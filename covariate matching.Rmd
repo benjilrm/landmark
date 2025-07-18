@@ -3,15 +3,18 @@
 
 Load packages
 ```{r}
-library(sf)          # Spatial data
-library(terra)       # Raster processing  
-library(spsurvey)    # Spatially balanced sampling
-library(MatchIt)     # Matching
-library(cobalt)      # Balance checking
-library(tidyverse)       # Data wrangling
-library(exactextractr) # Zonal stats
-library(rnaturalearth) # Country boundaries
-library(tmap)        # Making maps
+suppressPackageStartupMessages({
+  suppressWarnings({
+    library(sf)          # Spatial data
+  library(terra)       # Raster processing  
+  library(spsurvey)    # Spatially balanced sampling
+  library(MatchIt)     # Matching
+  library(cobalt)      # Balance checking
+  library(tidyverse)       # Data wrangling
+  library(exactextractr) # Zonal stats
+  library(rnaturalearth) # Country boundaries
+  library(tmap)        # Making maps
+  })})
 ```
 
 Settings and universal variables
@@ -26,9 +29,8 @@ options(scipen=999)
 
 # Import data
 
-
 ## List of countries for analysis
-```{r}
+```{r, eval = F}
 countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
 
 countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
@@ -36,21 +38,10 @@ countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "
 countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
 ```
 
-## Dependent variable
-```{r}
-snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)%>%
-  filter(geounit %in% countries_full)
-
-maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
-  filter(geounit %in% countries_full)%>%
-  st_make_valid()
-```
-
-
 ## Study area
 
 Define study area (based on adm1). We only want administrative areas that have at least one mine and one Indigenous territory, for both all territories and territories for which we have recognition data.
-```{r}
+```{r, eval = F}
 adm1s_full <- st_transform(ne_download(scale = 10, type = "states", category = "cultural", returnclass = "sf"), crs)%>%
   filter(admin %in% countries_full)%>%
   st_make_valid()
@@ -68,36 +59,42 @@ study_area_adm1s_recog = adm1_recog%>%
 ```
 
 We were unable to filter for areas that intersected with our Indigenous territories layer due to invalid geometries in that layer. We did this in ArcGIS Pro instead (see 'landmark_arcgis') and import back our study area of administrative areas.
-```{r}
+```{r, eval = F}
 st_write(study_area_adm1s_full, "Processed data/Study area/study_area_adm1s_full_mines.shp")
 st_write(study_area_adm1s_recog, "Processed data/Study area/study_area_adm1s_recog_mines.shp")
 
 rm(adm1s_full)
 rm(adm1_recog)
-
-study_area_adm1s_recog = st_read("Processed data/Landmark processed/landmark_recog_clipped_study_area.shp")
 ```
 
-## Independent variable
 ```{r}
-sf_use_s2(FALSE)
-
-st_layers("C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb")
-
-landmark = st_transform(st_read(dsn = "C:/Users/benji/Desktop/Landmark/landmark_arcgis/landmark_arcgis.gdb", layer = "community_landmark_singlepart"), crs)%>%
-  filter(Country %in% countries_full)%>%
-  rename(geometry = Shape)%>%
-  mutate(recognition = ifelse(Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented", 1, 0))%>%
-  st_make_valid()   
-
-landmark = landmark%>%
-  st_filter(., study_area_adm1s_full, .pred = st_intersects)
-
-study_area_adm1s_full = study_area_adm1s_full%>%
-  st_filter(., landmark, .pred = st_intersects())
-
-sf_use_s2(TRUE)
+study_area_adm1s_recog = st_transform(st_read("Processed data/Study area/study_area_adm1s_recog.shp"), crs)
+study_area_adm1s_full = st_transform(st_read("Processed data/Study area/study_area_adm1s_full.shp"), crs)
 ```
+
+
+## Dependent variable (mines)
+```{r}
+snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)%>%
+  filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)
+
+maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
+  st_make_valid()%>%
+  filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)
+```
+
+
+
+## Independent variable (Landmark)
+
+Load in our landmark datasets of Indigenous territories
+```{r, eval = F}
+landmark_study_area_full = st_read("Processed data/Landmark processed/landmark_and_garnett_full_study_area.shp")
+
+landmark_study_area_recog = st_read("Processed data/Landmark processed/landmark_recog_study_area.shp")
+```
+
+
 
 ## Covariates
 
@@ -105,6 +102,8 @@ Road density
 ```{r}
 road_density_raw = rast("Raw data/Covariates/Road access/GRIP4_density_total/grip4_total_dens_m_km2.asc")
 road_density = log(road_density_raw + 0.001)
+
+rm(road_density)
 ```
 
 Distance to water
@@ -119,8 +118,7 @@ Nightlights
 
 Protected areas
 ```{r}
-protected_areas = st_read("Raw data/Covariates/Protected areas/WDPA_WDOECM_May2025_Public_all/WDPA_WDOECM_May2025_Public_all.gdb", layer = "WDPA_WDOECM_poly_May2025_all")%>%
-  st_filter(., study_area_adm1s_full, .pred = st_intersects())
+protected_areas_full = st_read("Raw data/Covariates/Protected areas/protected_areas_study_area_full.shp")
 ```
 
 Land cover
@@ -135,13 +133,15 @@ cropland_binary = as.numeric(land_cover %in% c(12,14)) # Class 12 is cropland, 1
 
 plot(forest_binary)
 plot(cropland_binary)
+
+rm(land_cover)
 ```
 
 
-USGS ECM deposits
+## USGS ECM deposits
 ```{r}
 usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)%>%
-  filter(geounit %in% countries_full)
+  filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)
 ```
 
 Population Density
@@ -150,8 +150,26 @@ pop_dens = rast("Raw data/Covariates/Population density/gpw_v4_population_densit
 ```
 
 
-# Generate spatially balanced points
+# Spatially balanced sample
 
+## Descriptives
+
+Calculate area breakdown by 'recognition' type
+```{r}
+landmark_overlap = landmark_recog_clipped_study_area %>%
+  st_make_valid()%>%
+  mutate(area = st_area(.)) %>%  # Area of each landmark polygon
+  group_by(recognition)%>%      
+  summarize(
+    total_area = sum(area),      # Total area per recognition type
+    perc_of_study_area = as.numeric(total_area / st_area(study_area_adm1s_recog)) * 100)
+
+landmark_overlap
+```
+
+
+
+## Generate spatially balanced points
 Option A: Stratified by mine proximity (using spsurvey)
 ```{r}
 deposit_buffers$stratum = ifelse(
