@@ -14,6 +14,7 @@ suppressPackageStartupMessages({
   library(exactextractr) # Zonal stats
   library(rnaturalearth) # Country boundaries
   library(tmap)        # Making maps
+  library(spsurvey)    # Spatially balanced sampling
   })})
 ```
 
@@ -68,8 +69,10 @@ rm(adm1_recog)
 ```
 
 ```{r}
-study_area_adm1s_recog = st_transform(st_read("Processed data/Study area/study_area_adm1s_recog.shp"), crs)
-study_area_adm1s_full = st_transform(st_read("Processed data/Study area/study_area_adm1s_full.shp"), crs)
+study_area_adm1s_recog = st_transform(st_read("Processed data/Study area/study_area_adm1s_recog.shp"), crs)%>%
+  filter(name != "Chukchi Autonomous Okrug")
+study_area_adm1s_full = st_transform(st_read("Processed data/Study area/study_area_adm1s_full.shp"), crs)%>%
+  filter(name != "Chukchi Autonomous Okrug")
 ```
 
 
@@ -89,9 +92,10 @@ maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg")
 
 Load in our landmark datasets of Indigenous territories
 ```{r, eval = F}
-landmark_study_area_full = st_read("Processed data/Landmark processed/landmark_and_garnett_full_study_area.shp")
+landmark_study_area_recog = st_transform(st_read("Processed data/Landmark processed/landmark_recog_study_area.shp"), crs)
 
-landmark_study_area_recog = st_read("Processed data/Landmark processed/landmark_recog_study_area.shp")
+landmark_study_area_full = st_transform(st_read("Processed data/Landmark processed/landmark_and_garnett_full_study_area.shp"), crs)%>%
+  filter(st_is_valid(geometry))
 ```
 
 
@@ -103,7 +107,12 @@ Road density
 road_density_raw = rast("Raw data/Covariates/Road access/GRIP4_density_total/grip4_total_dens_m_km2.asc")
 road_density = log(road_density_raw + 0.001)
 
-rm(road_density)
+rm(road_density_raw)
+
+# If not already EPSG:4326, reproject it
+if (!grepl("EPSG:4326", crs(r, describe = TRUE))) {
+  r <- project(r, "EPSG:4326")
+}
 ```
 
 Distance to water
@@ -118,7 +127,8 @@ Nightlights
 
 Protected areas
 ```{r}
-protected_areas_full = st_read("Raw data/Covariates/Protected areas/protected_areas_study_area_full.shp")
+protected_areas_full = st_read("Raw data/Covariates/Protected areas/protected_areas_study_area_full.shp")%>%
+  filter(st_is_valid(geometry))
 ```
 
 Land cover
@@ -126,7 +136,7 @@ Land cover
 land_cover_path = "Raw data/Covariates/Land cover/MCD12C1.A2023001.061.2024251212901.hdf"
 gdal_subdatasets(land_cover_path)
 
-land_cover = rast(land_cover_path, subds = "Majority_Land_Cover_Type_1")
+land_cover = project(rast(land_cover_path, subds = "Majority_Land_Cover_Type_1"), "EPSG:4326")
 
 forest_binary = as.numeric(land_cover %in% 1:5)  # Classes 1-5 are forest types (Evergreen Needleleaf to Mixed Forests)
 cropland_binary = as.numeric(land_cover %in% c(12,14)) # Class 12 is cropland, 14 is cropland mosaic
@@ -138,7 +148,7 @@ rm(land_cover)
 ```
 
 
-## USGS ECM deposits
+USGS ECM deposits
 ```{r}
 usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)%>%
   filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)
@@ -155,7 +165,7 @@ pop_dens = rast("Raw data/Covariates/Population density/gpw_v4_population_densit
 ## Descriptives
 
 Calculate area breakdown by 'recognition' type
-```{r}
+```{r, eval = F}
 landmark_overlap = landmark_recog_clipped_study_area %>%
   st_make_valid()%>%
   mutate(area = st_area(.)) %>%  # Area of each landmark polygon
@@ -170,56 +180,79 @@ landmark_overlap
 
 
 ## Generate spatially balanced points
-Option A: Stratified by mine proximity (using spsurvey)
 ```{r}
-deposit_buffers$stratum = ifelse(
-  st_distance(deposit_buffers, mines) <= 10000, 1, 0  # 10km threshold
-)
+set.seed(1235)
 
-set.seed(42)
-samples = grts(
-  sf_object = deposit_buffers,
-  n_base = c(1000, 1000),  # Adjust based on your needs
-  stratum_var = "stratum"
-)
-sampled_points = st_as_sf(samples$sites_base)
+all_points = grts(st_transform(study_area_adm1s_full, crs = "+proj=moll"), n_base = 5000)$sites_base%>%
+  select(gn_name, geonunit, gu_a3)%>%
+  st_transform(., crs)%>%
+  mutate(point_id = row_number())
+```
+```{r}
+test
+
+tm_shape(test)+
+  tm_dots()+
+  tm_shape(test%>%filter(is.na(dist_to_water)))+
+  tm_dots(col = "red")
+
+tm_shape(study_area_adm1s_full)+
+  tm_polygons()
 ```
 
-Option B: Halton sequence (uniform random)
-```{r, eval = F}
-sampled_points = st_halton(2000, crs = st_crs(deposit_buffers)) %>%
-  st_as_sf() %>%
-  st_intersection(deposit_buffers)
-```
+
+
 
 # Extract covariates
 
-NEED TO CALCULATE DISTANCE TO NEAREST USGS DEPOSIT POINT
 ```{r}
 # Continuous variables
-sampled_points = sampled_points %>%
+all_points_full = all_points %>%
+  st_join(., landmark_study_area_full%>%select(Name:Doc_Status)%>%mutate(indigenous = 1), left = T)%>% 
+  st_join(., study_area_adm1s_recog%>%mutate(study_area_recog = 1)%>%select(study_area_recog))
+
+test = all_points_full%>%
+  group_by(point_id)%>%
+  slice(1)%>%
+  ungroup()%>%
   mutate(
-    road_density = extract(road_density, vect(.))[,2],
-    pop_density = extract(pop_density, vect(.))[,2],
-    dist_water = extract(dist_water, vect(.))[,2],
-    near_mine = st_distance(., mines) <= 10000)
-
-# Land cover classification
-lc_reclass = classify(landcover, 
-  matrix(c(10,1, 20,2, 30,2), ncol=2, byrow=TRUE))
-
-sampled_points$forest_cover = extract(
-  lc_reclass == 1, vect(sampled_points), buffer=1000, fun=mean, na.rm=TRUE)[,2]
-
-sampled_points$farmland_cover = extract(
-  lc_reclass == 2, vect(sampled_points), buffer=1000, fun=mean, na.rm=TRUE)[,2]
-
-# Protected areas
-sampled_points$protected = as.numeric(
-  st_intersects(sampled_points, protected_areas, sparse=FALSE))
-
-# Add country info
-sampled_points = st_join(sampled_points, countries)
+    across(c(indigenous, study_area_recog), ~replace_na(.x, 0)),
+    #indigenous = ifelse(indigenous == 1, 1, 0))
+    treatment_all = indigenous,
+    recognised = case_when(
+      Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented" ~ 1,
+      Form_Rec == "Not acknowledged by govt" | Doc_Status == "Not documented" | grepl("Held or used", Doc_Status) ~ 0),
+                           
+    treatment_recog = case_when(
+      recognised == 1 ~ 1,
+      indigenous == 0 & study_area_recog == 1 ~ 0),
+    treatment_unrecog = case_when(
+      recognised == 0 ~ 1,
+      indigenous == 0 & study_area_recog == 1 ~ 0),
+  
+    road_density = terra::extract(road_density, vect(.))[,2],
+    pop_density = terra::extract(pop_dens, vect(.))[,2],
+    dist_water = terra::extract(dist_to_water, vect(.))[,2],
+    forest_cover = terra::extract(forest_binary, vect(.))[,2],
+    cropland_cover = terra::extract(cropland_binary, vect(.))[,2],
+    protected_areas = as.numeric(st_intersects(., protected_areas_full, sparse=F)))
+    
+    maus_index = st_nearest_feature(geometry, maus),
+    maus_geom = maus$geometry[maus_index],
+    dist_to_maus_km = as.numeric(st_distance(geometry, maus_geom, by_element = T)),
+    snp_index = st_nearest_feature(geometry, maus),
+    snp_geom = snp$geometry[snp_index],
+    dist_to_maus_km = as.numeric(st_distance(geometry, snp_geom, by_element = T)),
+    dist_to_nearest_km = pmin(dist_to_maus_km, dist_to_snp_km),
+    
+    usgs_index = st_nearest_feature(geometry, usgs_deposits),
+    usgs_geom = usgs_deposits$geometry[usgs_index],
+    dist_to_usgs_km = as.numeric(st_distance(geometry, usgs_geom, by_element = T)),
+    
+    indig_terr = as.numeric(st_intersects(., landmark_study_area_full, sparse=F)))%>%
+  
+  select(-c(nearest_poly_index, nearest_poly_geom, indigenous))%>%
+  st_join(., study_area_adm1s_full%>%select(gn_name, geounit, gu_a3), join = st_within, left = T)
 ```
 
 # Matching
@@ -229,26 +262,33 @@ sampled_points = st_join(sampled_points, countries)
 sampled_points = sampled_points %>%
   mutate(
     indigenous = as.numeric(st_intersects(., indigenous_lands, sparse=FALSE)),
-    recognized = as.numeric(st_intersects(., recognized_lands, sparse=FALSE))
-  )
-
-# Create control pool
-control_pool = filter(sampled_points, indigenous == 0)
+    recognized = as.numeric(st_intersects(., recognized_lands, sparse=FALSE)))
 ```
 
 ```{r}
-match_recog = matchit(
-  recognized ~ road_density + pop_density + dist_water +
-               forest_cover + farmland_cover + protected,
-  data = bind_rows(
-    filter(sampled_points, recognized == 1),
-    control_pool
-  ),
+match_all = matchit(
+  treatment_all ~ road_density + pop_density + dist_water + forest_cover + farmland_cover + protected,
+  data = all_points,
   method = "nearest",
   exact = ~ country,
   caliper = 0.2,
-  ratio = 3
-)
+  ratio = 3)
+
+match_recog = matchit(
+  treatment_recog ~ road_density + pop_density + dist_water + forest_cover + farmland_cover + protected,
+  data = all_points,
+  method = "nearest",
+  exact = ~ country,
+  caliper = 0.2,
+  ratio = 3)
+
+match_unrecog = matchit(
+  treatment_unrecog ~ road_density + pop_density + dist_water + forest_cover + farmland_cover + protected,
+  data = all_points,
+  method = "nearest",
+  exact = ~ country,
+  caliper = 0.2,
+  ratio = 3)
 
 matched_recog = match.data(match_recog)
 ```
