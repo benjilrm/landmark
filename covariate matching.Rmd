@@ -91,8 +91,8 @@ maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg")
 ## Independent variable (Landmark)
 
 Load in our landmark datasets of Indigenous territories
-```{r, eval = F}
-landmark_study_area_recog = st_transform(st_read("Processed data/Landmark processed/landmark_recog_study_area.shp"), crs)
+```{r}
+#landmark_study_area_recog = st_transform(st_read("Processed data/Landmark processed/landmark_recog_study_area.shp"), crs)
 
 landmark_study_area_full = st_transform(st_read("Processed data/Landmark processed/landmark_and_garnett_full_study_area.shp"), crs)%>%
   filter(st_is_valid(geometry))
@@ -108,16 +108,11 @@ road_density_raw = rast("Raw data/Covariates/Road access/GRIP4_density_total/gri
 road_density = log(road_density_raw + 0.001)
 
 rm(road_density_raw)
-
-# If not already EPSG:4326, reproject it
-if (!grepl("EPSG:4326", crs(r, describe = TRUE))) {
-  r <- project(r, "EPSG:4326")
-}
 ```
 
 Distance to water
 ```{r}
-dist_to_water = rast("Raw data/Covariates/Distance to water/distance_to_water.tif")
+dist_to_water = mean(rast("Raw data/Covariates/Distance to water/distance_to_water_reprojected.tif"))
 ```
 
 Nightlights
@@ -126,9 +121,14 @@ Nightlights
 ```
 
 Protected areas
-```{r}
+```{r, eval = F}
 protected_areas_full = st_read("Raw data/Covariates/Protected areas/protected_areas_study_area_full.shp")%>%
   filter(st_is_valid(geometry))
+
+protected_areas = rast("Raw data/Covariates/Protected areas/protected.tif")
+protected_areas[is.na(protected_areas)] = 0
+
+
 ```
 
 Land cover
@@ -140,9 +140,6 @@ land_cover = project(rast(land_cover_path, subds = "Majority_Land_Cover_Type_1")
 
 forest_binary = as.numeric(land_cover %in% 1:5)  # Classes 1-5 are forest types (Evergreen Needleleaf to Mixed Forests)
 cropland_binary = as.numeric(land_cover %in% c(12,14)) # Class 12 is cropland, 14 is cropland mosaic
-
-plot(forest_binary)
-plot(cropland_binary)
 
 rm(land_cover)
 ```
@@ -188,16 +185,17 @@ all_points = grts(st_transform(study_area_adm1s_full, crs = "+proj=moll"), n_bas
   st_transform(., crs)%>%
   mutate(point_id = row_number())
 ```
-```{r}
-test
 
-tm_shape(test)+
-  tm_dots()+
-  tm_shape(test%>%filter(is.na(dist_to_water)))+
-  tm_dots(col = "red")
+```{r, eval = F}
+test
 
 tm_shape(study_area_adm1s_full)+
   tm_polygons()
+
+tm_shape(test)+
+  tm_dots(col = "dist_water")
+
+st_write(test, "Processed data/Sampling points/sampling_points_w_covariates.gpkg", delete_dsn = T)
 ```
 
 
@@ -217,7 +215,6 @@ test = all_points_full%>%
   ungroup()%>%
   mutate(
     across(c(indigenous, study_area_recog), ~replace_na(.x, 0)),
-    #indigenous = ifelse(indigenous == 1, 1, 0))
     treatment_all = indigenous,
     recognised = case_when(
       Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented" ~ 1,
@@ -235,25 +232,14 @@ test = all_points_full%>%
     dist_water = terra::extract(dist_to_water, vect(.))[,2],
     forest_cover = terra::extract(forest_binary, vect(.))[,2],
     cropland_cover = terra::extract(cropland_binary, vect(.))[,2],
-    protected_areas = as.numeric(st_intersects(., protected_areas_full, sparse=F)))
+    #protected_areas = as.numeric(st_intersects(., protected_areas_full, sparse=F)),
     
-    maus_index = st_nearest_feature(geometry, maus),
-    maus_geom = maus$geometry[maus_index],
-    dist_to_maus_km = as.numeric(st_distance(geometry, maus_geom, by_element = T)),
-    snp_index = st_nearest_feature(geometry, maus),
-    snp_geom = snp$geometry[snp_index],
-    dist_to_maus_km = as.numeric(st_distance(geometry, snp_geom, by_element = T)),
-    dist_to_nearest_km = pmin(dist_to_maus_km, dist_to_snp_km),
-    
-    usgs_index = st_nearest_feature(geometry, usgs_deposits),
-    usgs_geom = usgs_deposits$geometry[usgs_index],
-    dist_to_usgs_km = as.numeric(st_distance(geometry, usgs_geom, by_element = T)),
-    
-    indig_terr = as.numeric(st_intersects(., landmark_study_area_full, sparse=F)))%>%
-  
-  select(-c(nearest_poly_index, nearest_poly_geom, indigenous))%>%
-  st_join(., study_area_adm1s_full%>%select(gn_name, geounit, gu_a3), join = st_within, left = T)
+    dist_to_maus_km = as.numeric(st_distance(geometry, maus$geom[st_nearest_feature(geometry, maus)], by_element = TRUE)) / 1000,
+    dist_to_snp_km = as.numeric(st_distance(geometry, snp$geom[st_nearest_feature(geometry, snp)], by_element = TRUE)) / 1000,
+    dist_to_nearest_mine_km = pmin(dist_to_maus_km, dist_to_snp_km),
+    dist_to_usgs_km = as.numeric(st_distance(geometry, usgs_deposits$geom[st_nearest_feature(geometry, usgs_deposits)], by_element = TRUE)) / 1000)
 ```
+
 
 # Matching
 
