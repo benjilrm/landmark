@@ -15,88 +15,23 @@ suppressPackageStartupMessages({
   library(rnaturalearth) # Country boundaries
   library(tmap)        # Making maps
   library(spsurvey)    # Spatially balanced sampling
+  library(sandwich)
+  library(lmtest)
+  library(rmapshaper) # Spatial processing
   })})
 ```
 
 Settings and universal variables
 ```{r}
 tmap_mode(mode = "view")
+tmap_options(check.and.fix = TRUE)
 
 crs = 4326
-crs_dist = 8857
 
 options(scipen=999)
 ```
 
-# Import data
-
-## List of countries for analysis
-```{r, eval = F}
-countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
-
-countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
-
-countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
-```
-
-## Study area
-
-Define study area (based on adm1). We only want administrative areas that have at least one mine and one Indigenous territory, for both all territories and territories for which we have recognition data.
-```{r, eval = F}
-adm1s_full <- st_transform(ne_download(scale = 10, type = "states", category = "cultural", returnclass = "sf"), crs)%>%
-  filter(admin %in% countries_full)%>%
-  st_make_valid()
-
-adm1_recog = adm1s_full%>%
-  filter(admin %in% countries_recog)
-  
-study_area_adm1s_full = adm1s_full%>%
-  filter(lengths(st_intersects(., maus)) > 0 | 
-         lengths(st_contains(., snp)) > 0)
-
-study_area_adm1s_recog = adm1_recog%>%
-  filter(lengths(st_intersects(., maus)) > 0 | 
-         lengths(st_contains(., snp)) > 0)
-```
-
-We were unable to filter for areas that intersected with our Indigenous territories layer due to invalid geometries in that layer. We did this in ArcGIS Pro instead (see 'landmark_arcgis') and import back our study area of administrative areas.
-```{r, eval = F}
-st_write(study_area_adm1s_full, "Processed data/Study area/study_area_adm1s_full_mines.shp")
-st_write(study_area_adm1s_recog, "Processed data/Study area/study_area_adm1s_recog_mines.shp")
-
-rm(adm1s_full)
-rm(adm1_recog)
-```
-
-```{r}
-study_area_adm1s_recog = st_transform(st_read("Processed data/Study area/study_area_adm1s_recog.shp"), crs)%>%
-  filter(name != "Chukchi Autonomous Okrug")
-study_area_adm1s_full = st_transform(st_read("Processed data/Study area/study_area_adm1s_full.shp"), crs)%>%
-  filter(name != "Chukchi Autonomous Okrug")
-```
-
-
-## Dependent variable (mines)
-```{r}
-snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)%>%
-  filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)
-
-maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
-  st_make_valid()%>%
-  filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)
-```
-
-
-
-## Independent variable (Landmark)
-
-Load in our landmark datasets of Indigenous territories
-```{r}
-#landmark_study_area_recog = st_transform(st_read("Processed data/Landmark processed/landmark_recog_study_area.shp"), crs)
-
-landmark_study_area_full = st_transform(st_read("Processed data/Landmark processed/landmark_and_garnett_full_study_area.shp"), crs)%>%
-  filter(st_is_valid(geometry))
-```
+# Import & process data
 
 
 
@@ -127,28 +62,30 @@ protected_areas_full = st_read("Raw data/Covariates/Protected areas/protected_ar
 
 protected_areas = rast("Raw data/Covariates/Protected areas/protected.tif")
 protected_areas[is.na(protected_areas)] = 0
-
-
 ```
 
 Land cover
 ```{r}
 land_cover_path = "Raw data/Covariates/Land cover/MCD12C1.A2023001.061.2024251212901.hdf"
-gdal_subdatasets(land_cover_path)
+#gdal_subdatasets(land_cover_path)
 
 land_cover = project(rast(land_cover_path, subds = "Majority_Land_Cover_Type_1"), "EPSG:4326")
 
 forest_binary = as.numeric(land_cover %in% 1:5)  # Classes 1-5 are forest types (Evergreen Needleleaf to Mixed Forests)
 cropland_binary = as.numeric(land_cover %in% c(12,14)) # Class 12 is cropland, 14 is cropland mosaic
 
-rm(land_cover)
-```
+water = as.numeric(land_cover == 0)
+water[water == 0] = NA 
+water_sf <- st_as_sf(as.polygons(water, dissolve = TRUE))
 
+rm(land_cover)
+rm(water)
+```
 
 USGS ECM deposits
 ```{r}
-usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)%>%
-  filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)
+usgs_deposits = st_transform(st_read("Processed data/usgs_deposits_filtered.gpkg"), crs)
+#%>%  filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)
 ```
 
 Population Density
@@ -157,28 +94,227 @@ pop_dens = rast("Raw data/Covariates/Population density/gpw_v4_population_densit
 ```
 
 
-# Spatially balanced sample
+## Dependent variable (mines)
+```{r}
+snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)
+  #filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)%>%
+  #st_join(study_area_adm1s_full, largest = T)
 
-## Descriptives
+maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
+  st_make_valid()
+  #filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)%>%
+  #st_join(study_area_adm1s_full, largest = T)
+```
 
-Calculate area breakdown by 'recognition' type
+## Independent variable (Landmark)
+
+Load in our landmark datasets of Indigenous territories
 ```{r, eval = F}
-landmark_overlap = landmark_recog_clipped_study_area %>%
-  st_make_valid()%>%
-  mutate(area = st_area(.)) %>%  # Area of each landmark polygon
-  group_by(recognition)%>%      
-  summarize(
-    total_area = sum(area),      # Total area per recognition type
-    perc_of_study_area = as.numeric(total_area / st_area(study_area_adm1s_recog)) * 100)
+#landmark_study_area_recog = st_transform(st_read("Processed data/Landmark processed/landmark_recog_study_area.shp"), crs)
 
-landmark_overlap
+#landmark_study_area_full = st_transform(st_read("Processed data/Landmark processed/landmark_and_garnett_full_study_area.shp"), crs)%>%filter(st_is_valid(geometry))
+
+#garnett = st_transform(st_read("Raw data/Garnett et al/garnett_singlepart.shp"), crs)
+```
+
+
+## Study area
+
+Define study area (based on adm1). We only want administrative areas that have at least one mine and one Indigenous territory, for both all territories and territories for which we have recognition data. 
+
+So we create some new binary columns recording whether each adm1 intersects with a mine, indigenous territories, etc.
+```{r}
+adm1s_full <- st_transform(ne_download(scale = 10, type = "states", category = "cultural", returnclass = "sf"), crs)%>%
+  st_make_valid()%>%
+  mutate(geonunit = ifelse(is.na(geonunit), admin, geonunit),
+         gn_name = ifelse(is.na(gn_name), name, gn_name))%>%
+  select(gn_name, geonunit)%>%
+  mutate(
+    id = row_number(),
+    maus = (st_intersects(geometry, maus) %>% lengths() > 0) %>% as.integer(),
+    snp  = (st_intersects(geometry, snp) %>% lengths() > 0) %>% as.integer())
+
+adm1s_full$n_mines = lengths(st_intersects(adm1s_full, rbind(maus%>%select(geom), snp%>%select(geom))))
+```
+
+Due to computational constraints and broken geometries that sf struggles to handle, we're going to export this layer to ArcGIS Pro and create the columns for intersections with Indigenous territories there. 
+```{r, eval = F}
+st_write(adm1s_full, "Processed data/Study area/Intermediate/Adm1s, export to arcgis/adm1s_export_to_arcgis.shp", delete_dsn = T)
+```
+
+After doing that processing in ArcGIS Pro, we can now load our processed dataset back and filter for only adm1s that both contain ECM mines and intersect with Indigenous territories
+```{r}
+adm1s_arcgis = st_read("Processed data/Study area/Intermediate/Adm1s, export to arcgis/adm1s_export_to_arcgis.shp")%>%
+  select(id, garnett, indic, comm)%>%
+  rename(landmark_indicative = indic, landmark_community = comm)%>%
+  st_drop_geometry()
+
+adm1s_filtered = adm1s_full%>%
+  left_join(., adm1s_arcgis, by = "id")%>%
+  mutate(any_mine = ifelse(n_mines > 0, 1, 0), 
+         any_indig = ifelse(garnett + landmark_indicative + landmark_community > 0, 1, 0))%>%
+  filter(any_mine == 1 & any_indig == 1)
+
+rm(adm1s_arcgis, adm1s_full)
+```
+
+
+Let's just do a quick processing to make sure we're only considering mines in the study area
+```{r}
+maus = maus%>%
+  st_filter(., adm1s_filtered, .predicate = st_intersects)%>%
+  st_join(., adm1s_filtered%>%select(gn_name, geonunit))
+st_write(maus, "Processed data/Mines/maus_study_area.gpkg", delete_dsn = T)
+
+snp = snp%>%
+  st_filter(., adm1s_filtered, .predicate = st_intersects)%>%
+  st_join(., adm1s_filtered%>%select(gn_name, geonunit))
+st_write(snp, "Processed data/Mines/snp_study_area.gpkg", delete_dsn = T)
+```
+
+# Sampling points
+
+So eventually, we want to match mines to 'non-mines'. 
+
+Let's start off this process by separating our study area in mining areas and non-mining areas.
+
+## Mines
+
+First, let's set a sampling location for each mine 
+
+
+## Non-Mines
+
+We now want to generate the remaining samples as a spatially-balanced sample from non-mining areas. 
+
+To do that, we're going to exclude any areas within 10km of mines. 
+
+So first, let's generate a 10km buffer around each mine. 
+```{r}
+mine_buffer = rbind(
+  snp%>%select(Primary.Co, gn_name, geonunit, geom), 
+  maus%>%select(Primary.Co, gn_name, geonunit, geom))%>%
+    rename(primary_commodity = Primary.Co, geometry = geom)%>%
+  st_buffer(., dist = 10000)
+
+st_write(mine_buffer, "Processed data/Mines/mine_buffer_10km.gpkg", delete_dsn = T)
+```
+RESUME HERE
+
+Now we can remove these mining areas to generate non-mine areas within our study adm1s
+```{r}
+non_mine_full = st_difference(adm1s_filtered, st_union(mine_buffer)%>%st_make_valid())%>%
+  mutate(area = st_area(.))%>%
+  group_by(gn_name) %>%
+  filter(area == min(area))%>%  # The difference polygon is usually smaller
+  ungroup()%>%
+  select(-area)
+```
+
+
+```{r}
+non_mine_full%>%
+  data.frame()%>%
+  arrange(id)%>%
+  group_by(id)%>%
+  filter(n()>1)
+
+tm_shape(non_mine_full%>%group_by(id)%>%filter(n()>1)%>%mutate(yo = row_number())%>%filter(yo == 1))+
+  tm_polygons(col = "yo")+
+  tm_shape(snp%>%filter(geounit == "Ireland"))+
+  tm_dots()
+
+adm1s_no_water%>%
+  data.frame()%>%
+  filter(gn_name == "County Limerick")
+
+snp%>%data.frame()
+```
+
+
+Now, we want to remove any water from the study area so we don't sample there. 
+```{r}
+adm1s_no_water = rmapshaper::ms_erase(adm1s_filtered, water_sf)%>%
+  st_make_valid()%>%
+  filter(gn_name != "Chukotskiy Avtonomnyy Okrug")
+rm(adm1s_filtered)
+
+st_write(adm1s_no_water, "Processed data/Study area/adm1s_filtered.gpkg", delete_dsn = T)
+adm1s_no_water = st_read("Processed data/Study area/adm1s_filtered.gpkg")
 ```
 
 
 
-## Generate spatially balanced points
+
+
+
+
+
+
+# Spatially balanced sample
+
+## Study area processing
+
+
+
+Combine the two.
+Now we have a full polygon sf of adm1s, where each adm1 is essentially stratified by mine/non-mine. 
+```{r}
+study_area_full_stratified = rbind(mine_buffer%>%select(-primary_commodity), non_mine_full)
+
+rm(non_mine_full)
+
+st_write(study_area_full_stratified, "Processed data/Study area/Stratified by mine non-mine/study_area_full_stratified_mine_nonmine.gpkg", delete_dsn = T)
+
+study_area_full_stratified = st_read("Processed data/Study area/Stratified by mine non-mine/study_area_full_stratified_mine_nonmine.gpkg")
+```
+
+
+```{r}
+mine_buffer%>%data.frame()%>%
+  group_by(gn_name)%>%
+  reframe(n_mines = n(), sample_n = n_mines * 3)
+```
+
+
+GRTS design
+```{r}
+design <- list(
+  "mine" = list(
+    panel = c(Mines = sum(study_area_full_stratified$stratum == "mine")),
+    seltype = "Equal"
+  ),
+  "non_mine" = list(
+    panel = c(Controls = sum(study_area_full_stratified$stratum == "mine") * 2),
+    seltype = "Unequal"
+  )
+)
+
+```
+
+```{r}
+set.seed(1236)
+
+grts = grts(
+  design = design,
+  DesignID = "MineMatching",
+  type.frame = "area",
+  src.frame = "sf.object",
+  sf.object = study_area_full_stratified,
+  stratum = "stratum",
+  mdcaty = "gn_name", 
+  shapefile = FALSE)
+```
+
+
+
+Generate spatially balanced points
+
+Consider counting the number of mines in the adm1, and then generating 2x/3x/etc. the number of points. Stratify so that we get some on/near mines and some outside of a certain buffer of mines (ie: mines and 'non-mines')
 ```{r}
 set.seed(1235)
+
+study_area_adm1s_full%>%data.frame()%>%arrange(geonunit)
 
 all_points = grts(st_transform(study_area_adm1s_full, crs = "+proj=moll"), n_base = 5000)$sites_base%>%
   select(gn_name, geonunit, gu_a3)%>%
@@ -186,30 +322,15 @@ all_points = grts(st_transform(study_area_adm1s_full, crs = "+proj=moll"), n_bas
   mutate(point_id = row_number())
 ```
 
-```{r, eval = F}
-test
-
-tm_shape(study_area_adm1s_full)+
-  tm_polygons()
-
-tm_shape(test)+
-  tm_dots(col = "dist_water")
-
-st_write(test, "Processed data/Sampling points/sampling_points_w_covariates.gpkg", delete_dsn = T)
-```
-
-
-
 
 # Extract covariates
 
 ```{r}
 # Continuous variables
-all_points_full = all_points %>%
+test = all_points %>%
   st_join(., landmark_study_area_full%>%select(Name:Doc_Status)%>%mutate(indigenous = 1), left = T)%>% 
-  st_join(., study_area_adm1s_recog%>%mutate(study_area_recog = 1)%>%select(study_area_recog))
-
-test = all_points_full%>%
+  st_join(., study_area_adm1s_recog%>%mutate(study_area_recog = 1)%>%select(study_area_recog))%>%
+  
   group_by(point_id)%>%
   slice(1)%>%
   ungroup()%>%
@@ -237,28 +358,45 @@ test = all_points_full%>%
     dist_to_maus_km = as.numeric(st_distance(geometry, maus$geom[st_nearest_feature(geometry, maus)], by_element = TRUE)) / 1000,
     dist_to_snp_km = as.numeric(st_distance(geometry, snp$geom[st_nearest_feature(geometry, snp)], by_element = TRUE)) / 1000,
     dist_to_nearest_mine_km = pmin(dist_to_maus_km, dist_to_snp_km),
-    dist_to_usgs_km = as.numeric(st_distance(geometry, usgs_deposits$geom[st_nearest_feature(geometry, usgs_deposits)], by_element = TRUE)) / 1000)
+    dist_to_usgs_km = as.numeric(st_distance(geometry, usgs_deposits$geom[st_nearest_feature(geometry, usgs_deposits)], by_element = TRUE)) / 1000,
+    dist_to_mine_or_deposit_km = pmin(dist_to_nearest_mine_km, dist_to_usgs_km))
+```
+Post-processing with ArcGIS
+```{r}
+st_write(test, "Processed data/Sampling points/sampling_points_w_covariates.gpkg", delete_dsn = T)
+st_write(test, "Processed data/Sampling points/sampling_points_w_covariates.shp", delete_dsn = T)
+```
+
+```{r}
+protected_arcgis = st_read("Processed data/Sampling points/sampling_points_w_covariates.shp")
+test = st_read("Processed data/Sampling points/sampling_points_w_covariates.gpkg")
+
+test = test%>%
+  left_join(., protected_arcgis%>%select(point_d, protected)%>%rename(point_id = 1)%>%st_drop_geometry(), by = "point_id")%>%
+  mutate(across(c(protected, dist_water, pop_density, road_density), ~if_else(is.na(.), 0, .)),
+         #geonunit = ifelse(is.na(geonunit), "Spain", geonunit)
+         )
 ```
 
 
 # Matching
 
 ```{r}
-# Define treatment variables
-sampled_points = sampled_points %>%
-  mutate(
-    indigenous = as.numeric(st_intersects(., indigenous_lands, sparse=FALSE)),
-    recognized = as.numeric(st_intersects(., recognized_lands, sparse=FALSE)))
+tm_shape(test%>%
+  #data.frame()%>%
+  filter(is.na(geonunit)))+
+  tm_dots()
 ```
 
+Try different caliber widths for robustness?
+Can also try optimal matching as alternative to nearest neighbour
 ```{r}
 match_all = matchit(
-  treatment_all ~ road_density + pop_density + dist_water + forest_cover + farmland_cover + protected,
-  data = all_points,
+  treatment_all ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
+  data = test,
   method = "nearest",
-  exact = ~ country,
   caliper = 0.2,
-  ratio = 3)
+  exact = ~ geonunit)
 
 match_recog = matchit(
   treatment_recog ~ road_density + pop_density + dist_water + forest_cover + farmland_cover + protected,
@@ -281,31 +419,48 @@ matched_recog = match.data(match_recog)
 
 Balance checking
 ```{r}
-# Recognized lands balance
-bal.tab(match_recog, stats = c("mean.diffs", "ks.statistics"))
-love.plot(match_recog, threshold = 0.1, abs = TRUE)
-
-# Non-recognized lands balance  
-bal.tab(match_nonrecog, stats = c("mean.diffs", "ks.statistics"))
-love.plot(match_nonrecog, threshold = 0.1, abs = TRUE)
+summary(match_all, standardize = TRUE)
+bal.tab(match_all, stats = c("mean.diffs", "ks.statistics"))
+love.plot(match_all, threshold = 0.1, abs = TRUE)
 ```
 
 # Analysis
+
+Consider:
+-Fixed effects by country or adm1 (using factor() in regression equation)
+-Cluster errors by adm1/country. ex: coeftest(reg_model, vcov = vcovCL(reg_model, cluster = ~adm1))
+-
+
 ```{r}
-# Add outcome variable
-matched_recog = matched_recog %>%
-  mutate(mine_outcome = as.numeric(near_mine))
+match_all_df <- match.data(match_all)%>%
+  mutate(mine_within_10km = ifelse(dist_to_nearest_mine_km < 10, 1, 0))
 
-matched_nonrecog = matched_nonrecog %>%
-  mutate(mine_outcome = as.numeric(near_mine))
+table(match_all_df$mine_within_10km)
+table(match_all_df$treatment_all)
 
+model_base = glm(
+  mine_within_10km ~ treatment_all + road_density + pop_density +
+                forest_cover + cropland_cover,
+  data = match_all_df,
+  family = binomial())
+
+summary(model_base)
+
+# Clustered SEs by ADM1
+coeftest(model_base, vcov = vcovCL(model_base, cluster = ~ geonunit))
+
+
+# Run McNemar's test
+mcnemar.test(table(match_all_df$treatment_all, match_all_df$mine_within_10km))
+```
+
+```{r}
 # Recognized lands model
 model_recog = glm(
   mine_outcome ~ recognized + road_density + pop_density +
                 forest_cover + farmland_cover + factor(country),
   data = matched_recog,
-  family = binomial()
-)
+  family = binomial())
 
 # Non-recognized lands model
 model_nonrecog = glm(
@@ -320,3 +475,17 @@ summary(model_recog)
 summary(model_nonrecog)
 ```
 
+
+
+
+# Archive
+
+
+List of countries for analysis
+```{r, eval = F}
+countries_df = read.csv("Processed data/data_breakdown_by_country_apr30.csv")
+
+countries_full = as.vector(countries_df%>%filter((landmark %in% c("Full Data", "Indicative areas") | in_garnett == "Yes") & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
+
+countries_recog = as.vector(countries_df%>%filter(landmark == "Full Data" & (maus_polygons > 0 | snp_points > 0))%>%pull(country))
+```
