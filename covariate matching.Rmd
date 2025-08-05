@@ -100,8 +100,6 @@ snp = st_transform(st_read("Processed data/snp_points_filtered.gpkg"), crs)
   #filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)%>%
   #st_join(study_area_adm1s_full, largest = T)
 
-#DUPLICATES?
-
 maus = st_transform(st_read("Processed data/maus_polygons_filtered_joined.gpkg"), crs)%>%
   st_make_valid()
   #filter(lengths(st_intersects(., study_area_adm1s_full)) > 0)%>%
@@ -135,8 +133,6 @@ adm1s_full <- st_transform(ne_download(scale = 10, type = "states", category = "
     id = row_number(),
     maus = (st_intersects(geometry, maus) %>% lengths() > 0) %>% as.integer(),
     snp  = (st_intersects(geometry, snp) %>% lengths() > 0) %>% as.integer())
-
-adm1s_full$n_mines = lengths(st_intersects(adm1s_full, rbind(maus%>%select(geom), snp%>%select(geom))))
 ```
 
 Due to computational constraints and broken geometries that sf struggles to handle, we're going to export this layer to ArcGIS Pro and create the columns for intersections with Indigenous territories there. 
@@ -153,17 +149,17 @@ adm1s_arcgis = st_read("Processed data/Study area/Intermediate/Adm1s, export to 
 
 adm1s_filtered = adm1s_full%>%
   left_join(., adm1s_arcgis, by = "id")%>%
-  mutate(any_mine = ifelse(n_mines > 0, 1, 0), 
+  mutate(any_mine = ifelse(maus > 0 | snp > 0, 1, 0), 
          any_indig = ifelse(garnett + landmark_indicative + landmark_community > 0, 1, 0))%>%
   filter(any_mine == 1 & any_indig == 1)
 
 rm(adm1s_arcgis, adm1s_full)
-
-st_write(adm1s_filtered, "Processed data/Study area/adm1s_filtered.gpkg", delete_dsn = T)
 ```
+## Mines in study area
 
+Let's filter our mine datasets (both Maus polygons and S&P points) to ensure that we're only considering mines that intersect the study area. 
 
-Let's just do a quick processing to make sure we're only considering mines in the study area
+For Maus, we'll also consolidate any duplicates based on the 'Local ID' column as well, and conduct a spatial join to bring in the adm1 and country data. 
 ```{r}
 maus_study_area = maus%>%
   st_filter(., adm1s_filtered, .predicate = st_intersects)%>%
@@ -182,7 +178,7 @@ maus_filtered = maus_study_area%>%
 st_write(maus_filtered, "Processed data/Mines/maus_study_area.gpkg", delete_dsn = T)
 ```
 
-
+Now, for the S&P dataset, we also filter for points in the study area, and get rid of any duplicates, as defined by any mining points that are both 1) within or right next to (within 1km) a Maus mining polygon, AND 2) share the same primary commodity as the Maus polygon they're in/next to.
 ```{r}
 snp_study_area = snp%>%
   rename(primary_commodity = Primary.Co)%>%
@@ -192,22 +188,38 @@ snp_study_area = snp%>%
   st_join(., adm1s_filtered%>%select(gn_name, geonunit))
 
 snp_in_maus = snp_study_area%>%
-  st_join(., st_buffer(maus_filtered, 5000))
-  st_filter(., maus, .predicate = st_within)%>%
+  st_join(., st_buffer(maus_filtered, 1000))%>%
   filter(primary_commodity.x == primary_commodity.y)
   
 snp_filtered = snp_study_area%>%
   filter(!id %in% snp_in_maus$id.x)
-st_write(snp, "Processed data/Mines/snp_study_area.gpkg", delete_dsn = T)
 
+st_write(snp_filtered, "Processed data/Mines/snp_study_area.gpkg", delete_dsn = T)
 
+rm(snp_in_maus, snp_study_area, snp)
+```
+
+Load the processed mining datasets back in and map to confirm everything looks good
+```{r}
 maus_filtered = st_read("Processed data/Mines/maus_study_area.gpkg")
 snp_filtered = st_read("Processed data/Mines/snp_study_area.gpkg")
 
-tm_shape(st_buffer(maus_filtered%>%filter(geonunit == "Argentina"), 5000))+
+tm_shape(maus_filtered%>%filter(geonunit == "Argentina"))+
   tm_polygons()+
-  tm_shape(snp_filtered%>%filter(geonunit == "Argentina"))+
-  tm_dots()
+  tm_shape(st_buffer(maus_filtered%>%filter(geonunit == "Argentina"), 2000))+
+  tm_borders()+
+  tm_shape(snp_study_area%>%filter(geonunit == "Argentina"))+
+  tm_dots()+
+  tm_basemap("Esri.WorldImagery")
+```
+
+Last, let's count how many mines are in each adm1, so that we can callibrate the proportion of how many samples to take in non-mining areas.
+```{r}
+adm1s_filtered$n_mines = lengths(st_intersects(adm1s_filtered, rbind(maus_filtered%>%select(geom), snp_filtered%>%select(geom))))
+adm1s_no_water$n_sample = adm1s_no_water$n_mines * 2
+
+st_write(adm1s_filtered, "Processed data/Study area/adm1s_filtered.gpkg", delete_dsn = T)
+adm1s_filtered = st_read("Processed data/Study area/adm1s_filtered.gpkg")
 ```
 
 # Sampling points
@@ -219,101 +231,106 @@ Let's start off this process by separating our study area in mining areas and no
 ## Mines
 
 First, let's set a sampling location for each mine.
-The S&P dataset is already points so let's sample points from the Maus dataset and combine the two.
+
+The S&P dataset is already points so we can sample random points from the Maus dataset (one from each mine) and combine the two.
+
+Sampling one random point per Maus mine
 ```{r}
 set.seed(1236)
 
 # Sample one point per polygon
-sampled_pts <- lapply(st_geometry(maus), function(poly) {
+sampled_pts <- lapply(st_geometry(maus_filtered), function(poly) {
   pt <- st_sample(poly, size = 1, type = "random", exact = TRUE)
   if (length(pt) == 0) st_point(c(NA_real_, NA_real_)) else pt[[1]]})
 
-# Combine into a POINT geometry list
-pts_sfc <- st_sfc(sampled_pts, crs = st_crs(maus))
-
 # Create a new sf object (copying attributes if desired)
-maus_sampling_pts <- st_sf(geometry = pts_sfc)%>%
-  st_join(., maus)
+maus_sampling_pts = st_sf(geometry = st_sfc(sampled_pts, crs = st_crs(maus_filtered)))%>%
+  st_join(., maus_filtered)
 
-tm_shape(maus%>%filter(gn_name == "Otago"))+
+rm(sampled_pts)
+```
+
+Map check to make sure everything looks good
+```{r}
+tm_shape(maus_filtered%>%filter(gn_name == "Otago"))+
   tm_polygons()+
   tm_shape(maus_sampling_pts%>%filter(gn_name == "Otago"))+
   tm_dots()
 ```
 
+Combining with deduplicated S&P points to generate 1 dataset with all mining sampling points with covariates
+```{r}
+comb_mining_sampling_pts = rbind(maus_sampling_pts%>%rename(geom = geometry), snp_filtered)
+
+st_write(comb_mining_sampling_pts, "Processed data/Sampling points/comb_mining_sampling_pts.gpkg", delete_dsn = T)
+```
 
 
 ## Non-Mines
 
-We now want to generate the remaining samples as a spatially-balanced sample from non-mining areas. 
+We now want to generate the remaining sampling points as a spatially-balanced sample from non-mining areas. 
 
 To do that, we're going to exclude any areas within 10km of mines. 
 
 So first, let's generate a 10km buffer around each mine. 
 ```{r}
-mine_buffer = rbind(
-  snp%>%select(Primary.Co, gn_name, geonunit, geom), 
-  maus%>%select(Primary.Co, gn_name, geonunit, geom))%>%
-    rename(primary_commodity = Primary.Co)%>%
+mine_buffer = rbind(snp_filtered, maus_filtered)%>%
   st_buffer(., dist = 10000)
 
 st_write(mine_buffer, "Processed data/Mines/mine_buffer_10km.gpkg", delete_dsn = T)
 ```
-RESUME HERE
 
-Now we can remove these mining areas to generate non-mine areas within our study adm1s
+Now we can remove these mining areas to generate non-mine areas within our study adm1s. 
 ```{r}
 non_mine_full = st_difference(adm1s_filtered, st_union(mine_buffer)%>%st_make_valid())%>%
   mutate(area = st_area(.))%>%
-  group_by(gn_name) %>%
+  group_by(gn_name, geonunit) %>%
   filter(area == min(area))%>%  # The difference polygon is usually smaller
   ungroup()%>%
   select(-area)
 ```
 
 
+Now, we want to remove any water from the study area so we don't sample there. 
 ```{r}
-non_mine_full%>%
+adm1s_no_water = rmapshaper::ms_erase(non_mine_full%>%filter(gn_name != "Chukotskiy Avtonomnyy Okrug"), water_sf)%>%
+  st_make_valid()
+rm(adm1s_filtered)
+
+st_write(adm1s_no_water, "Processed data/Study area/nonmines_no_water.gpkg", delete_dsn = T)
+adm1s_no_water = st_read("Processed data/Study area/nonmines_no_water.gpkg")
+```
+
+
+RESUME HERE
+
+Finally, we can sample non-mining areas in the adm1s of interest. For a given adm1, we'll sample 2x the # of mines located in that adm1.
+```{r}
+# Sample points
+sampled_points <- map2_dfr(
+  adm1s_no_water$geometry,
+  adm1s_no_water$n_sample,
+  ~ if (.y > 0) {
+      pts <- st_sample(.x, size = .y, type = "regular")
+      st_sf(geometry = pts) |> st_set_crs(crs)} 
+  else {NULL})
+
+# NUMBER OF SAMPLING POINTS DOESN'T SEEM TO LINE UP. TOO MANY IN SOME ADM1S, TOO FEW IN OTHERS
+
+sampled_points%>%
+  st_join(., adm1s_no_water%>%select(id, gn_name, geonunit))%>%
   data.frame()%>%
   arrange(id)%>%
-  group_by(id)%>%
-  filter(n()>1)
-
-tm_shape(non_mine_full%>%group_by(id)%>%filter(n()>1)%>%mutate(yo = row_number())%>%filter(yo == 1))+
-  tm_polygons(col = "yo")+
-  tm_shape(snp%>%filter(geounit == "Ireland"))+
-  tm_dots()
+  group_by(id, gn_name, geonunit)%>%
+  reframe(n = n())
 
 adm1s_no_water%>%
   data.frame()%>%
-  filter(gn_name == "County Limerick")
+  select(id, 1:2, n_mines, n_sample)
 
-snp%>%data.frame()
 ```
 
-
-Now, we want to remove any water from the study area so we don't sample there. 
-```{r}
-adm1s_no_water = rmapshaper::ms_erase(adm1s_filtered, water_sf)%>%
-  st_make_valid()%>%
-  filter(gn_name != "Chukotskiy Avtonomnyy Okrug")
-rm(adm1s_filtered)
-
-st_write(adm1s_no_water, "Processed data/Study area/adm1s_filtered.gpkg", delete_dsn = T)
-adm1s_no_water = st_read("Processed data/Study area/adm1s_filtered.gpkg")
-```
-
-
-
-
-
-
-# Spatially balanced sample
-
-## Study area processing
-
-
-
+# Combining
 Combine the two.
 Now we have a full polygon sf of adm1s, where each adm1 is essentially stratified by mine/non-mine. 
 ```{r}
@@ -324,13 +341,6 @@ rm(non_mine_full)
 st_write(study_area_full_stratified, "Processed data/Study area/Stratified by mine non-mine/study_area_full_stratified_mine_nonmine.gpkg", delete_dsn = T)
 
 study_area_full_stratified = st_read("Processed data/Study area/Stratified by mine non-mine/study_area_full_stratified_mine_nonmine.gpkg")
-```
-
-
-```{r}
-mine_buffer%>%data.frame()%>%
-  group_by(gn_name)%>%
-  reframe(n_mines = n(), sample_n = n_mines * 3)
 ```
 
 
