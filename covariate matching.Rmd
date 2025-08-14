@@ -18,6 +18,7 @@ suppressPackageStartupMessages({
   library(sandwich)
   library(lmtest)
   library(rmapshaper) # Spatial processing
+  library(fixest) # fixed effects regression
   })})
 ```
 
@@ -49,11 +50,13 @@ rm(road_density_raw)
 Distance to water
 ```{r}
 dist_to_water = mean(rast("Raw data/Covariates/Distance to water/distance_to_water_reprojected.tif"))
+
+plot(dist_to_water)
 ```
 
 Nightlights
 ```{r}
-#nightlights = rast("Raw data/Covariates/Nightlights/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif")
+nightlights = rast("Raw data/Covariates/Nightlights/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif/VNL_npp_2024_global_vcmslcfg_v2_c202502261200.average_masked.dat.tif")
 ```
 
 Protected areas
@@ -113,7 +116,7 @@ Load in our landmark datasets of Indigenous territories
 ```{r, eval = F}
 #landmark_study_area_recog = st_transform(st_read("Processed data/Landmark processed/landmark_recog_study_area.shp"), crs)
 
-#landmark_study_area_full = st_transform(st_read("Processed data/Landmark processed/landmark_and_garnett_full_study_area.shp"), crs)%>%filter(st_is_valid(geometry))
+landmark_study_area_full = st_transform(st_read("Processed data/Landmark processed/landmark_and_garnett_full_study_area.shp"), crs)%>%filter(st_is_valid(geometry))
 
 #garnett = st_transform(st_read("Raw data/Garnett et al/garnett_singlepart.shp"), crs)
 ```
@@ -131,7 +134,7 @@ adm1s_full <- st_transform(ne_download(scale = 10, type = "states", category = "
          gn_name = ifelse(is.na(gn_name), name, gn_name))%>%
   select(gn_name, geonunit)%>%
   mutate(
-    adm1_id = row_number(),
+    adm1_id = as.factor(row_number()),
     maus = (st_intersects(geometry, maus) %>% lengths() > 0) %>% as.integer(),
     snp  = (st_intersects(geometry, snp) %>% lengths() > 0) %>% as.integer())
 ```
@@ -177,7 +180,6 @@ maus_filtered = maus_study_area%>%
   ungroup()%>%
   select(primary_commodity)%>%
   rbind(., maus_study_area%>%filter(is.na(LocalID))%>%select(primary_commodity))%>%
-  #mutate(id = row_number())%>%
   st_join(., adm1s_filtered%>%select(adm1_id, gn_name, geonunit))
   
 st_write(maus_filtered, "Processed data/Mines/maus_study_area.gpkg", delete_dsn = T)
@@ -327,6 +329,7 @@ non_mining_sample = grts(st_transform(adm1s_no_water, crs_sampling), n_base = st
 
 non_mining_sample_pts = st_transform(non_mining_sample$sites_base, crs)
 st_write(non_mining_sample_pts, "Processed data/Sampling points/non_mining_sampling_pts.gpkg", delete_dsn = T)
+non_mining_sample_pts = st_read("Processed data/Sampling points/non_mining_sampling_pts.gpkg")
 
 rm(non_mining_sample)
 ```
@@ -336,18 +339,18 @@ Combine the two.
 
 ```{r}
 comb_mining_sampling_pts%>%data.frame()
-sf_sample_pts%>%data.frame()
+non_mining_sample_pts%>%data.frame()
 
 all_sampling_pts = rbind(
   comb_mining_sampling_pts%>%mutate(stratum = "mine"),
-  sf_sample_pts%>%select(id, gn_name, geonunit)%>%mutate(stratum = "non-mine", primary_commodity = NA))%>%
-  rename(adm1_id = id)%>%
+  non_mining_sample_pts%>%select(adm1_id, gn_name, geonunit)%>%mutate(stratum = "non-mine", primary_commodity = NA, dataset = NA, mine_id = NA))%>%
+  arrange(adm1_id)%>%
   mutate(point_id = row_number())
+  
 
 st_write(all_sampling_pts, "Processed data/Sampling points/all_sampling_pts.gpkg", delete_dsn = T)
 all_sampling_pts = st_read("Processed data/Sampling points/all_sampling_pts.gpkg")
 ```
-
 
 # Extract covariates
 
@@ -355,13 +358,15 @@ all_sampling_pts = st_read("Processed data/Sampling points/all_sampling_pts.gpkg
 # Continuous variables
 test = all_sampling_pts %>%
   st_join(., landmark_study_area_full%>%select(Name:Doc_Status)%>%mutate(indigenous = 1), left = T)%>% 
-  #st_join(., study_area_adm1s_recog%>%mutate(study_area_recog = 1)%>%select(study_area_recog))%>%
-  
+
   group_by(point_id)%>%
   slice(1)%>%
   ungroup()%>%
+  
+  left_join(., adm1s_filtered%>%select(adm1_id, landmark_community)%>%st_drop_geometry(), by = "adm1_id")%>%
+  
   mutate(
-    across(c(indigenous, study_area_recog), ~replace_na(.x, 0)),
+    indigenous = ifelse(is.na(indigenous), 0, indigenous),
     treatment_all = indigenous,
     recognised = case_when(
       Form_Rec == "Acknowledged by govt" & Doc_Status == "Documented" ~ 1,
@@ -369,16 +374,16 @@ test = all_sampling_pts %>%
                            
     treatment_recog = case_when(
       recognised == 1 ~ 1,
-      indigenous == 0 & study_area_recog == 1 ~ 0),
+      indigenous == 0 & landmark_community == 1 ~ 0),
     treatment_unrecog = case_when(
       recognised == 0 ~ 1,
-      indigenous == 0 & study_area_recog == 1 ~ 0),
+      indigenous == 0 & landmark_community == 1 ~ 0),
   
     road_density = terra::extract(road_density, vect(.))[,2],
     pop_density = terra::extract(pop_dens, vect(.))[,2],
     dist_water = terra::extract(dist_to_water, vect(.))[,2],
     forest_cover = terra::extract(forest_binary, vect(.))[,2],
-    cropland_cover = terra::extract(cropland_binary, vect(.))[,2],
+    cropland_cover = terra::extract(cropland_binary, vect(.))[,2])
     #protected_areas = as.numeric(st_intersects(., protected_areas_full, sparse=F)),
     
     dist_to_maus_km = as.numeric(st_distance(geometry, maus$geom[st_nearest_feature(geometry, maus)], by_element = TRUE)) / 1000,
@@ -390,7 +395,6 @@ test = all_sampling_pts %>%
 
 Post-processing with ArcGIS
 ```{r}
-st_write(test, "Processed data/Sampling points/sampling_points_w_covariates.gpkg", delete_dsn = T)
 st_write(test, "Processed data/Sampling points/sampling_points_w_covariates.shp", delete_dsn = T)
 ```
 
@@ -400,55 +404,98 @@ test = st_read("Processed data/Sampling points/sampling_points_w_covariates.gpkg
 
 test = test%>%
   left_join(., protected_arcgis%>%select(point_d, protected)%>%rename(point_id = 1)%>%st_drop_geometry(), by = "point_id")%>%
-  mutate(across(c(protected, dist_water, pop_density, road_density), ~if_else(is.na(.), 0, .)),
-         #geonunit = ifelse(is.na(geonunit), "Spain", geonunit)
-         )
+  mutate(
+    across(c(protected, dist_water, pop_density, road_density), ~ if_else(is.na(.), 0, .)),
+    stratum_mine = if_else(stratum == "mine", 1, 0))
+
+st_write(test, "Processed data/Sampling points/sampling_points_w_covariates.gpkg", delete_dsn = T)
+rm(protected_arcgis)
 ```
 
 
 # Matching
 
-```{r}
-tm_shape(test%>%
-  #data.frame()%>%
-  filter(is.na(geonunit)))+
-  tm_dots()
-```
+Set up covariate matching, where for every mine, we find a non-mining point within the same ADM1 that are as similar as possible to the mining point in terms of our other covariates. 
 
-Try different caliber widths for robustness?
-Can also try optimal matching as alternative to nearest neighbour
+We will run a couple versions of this: 1) for all mines, 2) for mines in areas where we have recognised Indigenous territories, and 3) for mines in areas where we have unrecognised Indigenous territories. 
+
+Notes:
+- Try different caliber widths for robustness?
+- Can also try optimal matching as alternative to nearest neighbour
+- Try exact match by country (rather than ADM1) as robustness check
 ```{r}
+set.seed(1238)
+
 match_all = matchit(
-  treatment_all ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
+  stratum_mine ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
   data = test,
   method = "nearest",
-  caliper = 0.2,
-  exact = ~ geonunit)
+  caliper = 0.1,
+  exact = ~ adm1_id)
+match_all
+save(match_all, file = "match_all.Rdata")
+#load("match_all.Rdata")
 
 match_recog = matchit(
-  treatment_recog ~ road_density + pop_density + dist_water + forest_cover + farmland_cover + protected,
-  data = all_points,
+  stratum_mine ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
+  data = test%>%filter(landmark_community == 1 & !is.na(treatment_recog)),
   method = "nearest",
-  exact = ~ country,
-  caliper = 0.2,
-  ratio = 3)
+  exact = ~ adm1_id,
+  caliper = 0.2)
+match_recog
+save(match_recog, file = "match_recog.Rdata")
+load("match_recog.Rdata")
+
 
 match_unrecog = matchit(
-  treatment_unrecog ~ road_density + pop_density + dist_water + forest_cover + farmland_cover + protected,
-  data = all_points,
+  stratum_mine ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
+  data = test%>%filter(landmark_community == 1 & !is.na(treatment_unrecog)),
   method = "nearest",
-  exact = ~ country,
-  caliper = 0.2,
-  ratio = 3)
+  exact = ~ adm1_id,
+  caliper = 0.1)
+match_unrecog
+save(match_unrecog, file = "match_unrecog.Rdata")
+load("match_unrecog.Rdata")
 
-matched_recog = match.data(match_recog)
+
+match_community = matchit(
+  stratum_mine ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
+  data = test%>%filter(landmark_community == 1 & (!is.na(treatment_unrecog) | !is.na(treatment_recog))),
+  method = "nearest",
+  exact = ~ adm1_id,
+  caliper = 0.2)
+save(match_community, file = "match_community.Rdata")
+load("match_community.Rdata")
 ```
 
 Balance checking
 ```{r}
-summary(match_all, standardize = TRUE)
-bal.tab(match_all, stats = c("mean.diffs", "ks.statistics"))
-love.plot(match_all, threshold = 0.1, abs = TRUE)
+#summary(match_all, standardize = TRUE)
+#bal.tab(match_all, stats = c("mean.diffs", "ks.statistics"))
+
+plot_balance <- function(match_data, threshold = 0.1) {
+  # Generate the love plot
+  love <- love.plot(match_data, threshold = threshold, abs = T)
+  
+  # Extract and filter the data (removing 'adm1' variables)
+  love_data <- ggplot_build(love)
+  love_data_filtered <- love_data$plot$data %>%
+    filter(!grepl("adm1|geonunit", var) & var != "distance")
+  
+  # Recreate the plot
+  ggplot(love_data_filtered, aes(x = stat, y = var, color = Sample)) +
+    geom_point() +
+    geom_vline(xintercept = threshold, linetype = 'dashed') +
+    geom_vline(xintercept = 0) +
+    theme_classic() +
+    labs(
+      x = "Standardized Mean Difference",
+      y = "Covariates")}
+
+plot_balance(match_all, threshold = 0.1)
+plot_balance(match_recog, threshold = 0.1)
+plot_balance(match_unrecog, threshold = 0.1)
+plot_balance(match_community, threshold = 0.1)
 ```
 
 # Analysis
@@ -456,51 +503,121 @@ love.plot(match_all, threshold = 0.1, abs = TRUE)
 Consider:
 -Fixed effects by country or adm1 (using factor() in regression equation)
 -Cluster errors by adm1/country. ex: coeftest(reg_model, vcov = vcovCL(reg_model, cluster = ~adm1))
--
 
+## Overall
 ```{r}
-match_all_df <- match.data(match_all)%>%
-  mutate(mine_within_10km = ifelse(dist_to_nearest_mine_km < 10, 1, 0))
+match_all_df <- match.data(match_all)
 
-table(match_all_df$mine_within_10km)
 table(match_all_df$treatment_all)
 
 model_base = glm(
-  mine_within_10km ~ treatment_all + road_density + pop_density +
-                forest_cover + cropland_cover,
+  treatment_all ~ stratum_mine + road_density + pop_density +
+                forest_cover + cropland_cover + protected + factor(geonunit),
   data = match_all_df,
   family = binomial())
 
 summary(model_base)
-
-# Clustered SEs by ADM1
-coeftest(model_base, vcov = vcovCL(model_base, cluster = ~ geonunit))
-
+coeftest(model_base, vcov = vcovCL(model_base, cluster = ~ geonunit)) # Clustered SEs by country
 
 # Run McNemar's test
-mcnemar.test(table(match_all_df$treatment_all, match_all_df$mine_within_10km))
+mcnemar.test(table(match_all_df$stratum_mine, match_all_df$treatment_all))
+chisq.test(match_all_df$stratum_mine, match_all_df$treatment_all)
+
+summary(feglm(treatment_all ~ stratum_mine + road_density + pop_density +
+                forest_cover + cropland_cover + protected | geonunit,
+              cluster = "geonunit",
+              data = match_all_df,
+              family = "binomial"))
 ```
+Match okay? 1402 of 5160 points in Indigenous territories. 
+
+Overall, mines are less likely to be on Indigenous territories, compared to the counterfactual of 'non-mines'. Robust to clustering and not clustering standard errors. Also to McNemar's test
 
 ```{r}
-# Recognized lands model
+table(match_all_df$recognised)
+
+summary(feglm(recognised ~ stratum_mine + road_density + pop_density +
+                forest_cover + cropland_cover + protected | geonunit,
+              cluster = "geonunit",
+              data = match_all_df,
+              family = "binomial"))
+
+match_community_df <- match.data(match_community)
+table(match_community_df$recognised)
+summary(feglm(recognised ~ stratum_mine + road_density + pop_density +
+                forest_cover + cropland_cover + protected | geonunit,
+              cluster = "geonunit",
+              data = match_community_df,
+              family = "binomial"))
+```
+Mines significantly less likely to be on recognised lands than non-recognised lands. 
+
+
+## Recognised
+Recognised territories vs non-Indigenous lands
+```{r}
+match_recog_df <- match.data(match_recog)
+
+table(match_recog_df$treatment_recog)
+
 model_recog = glm(
-  mine_outcome ~ recognized + road_density + pop_density +
-                forest_cover + farmland_cover + factor(country),
-  data = matched_recog,
+  treatment_recog ~ stratum_mine + road_density + pop_density + 
+                forest_cover + cropland_cover + protected + factor(geonunit),
+  data = match_recog_df,
   family = binomial())
 
-# Non-recognized lands model
-model_nonrecog = glm(
-  mine_outcome ~ indigenous + road_density + pop_density +
-                forest_cover + farmland_cover + factor(country), 
-  data = matched_nonrecog,
-  family = binomial()
-)
-
-# Compare results
 summary(model_recog)
-summary(model_nonrecog)
+
+# Clustered SEs by ADM1
+coeftest(model_recog, vcov = vcovCL(model_recog, cluster = ~ geonunit))
+
+summary(feglm(treatment_recog ~ stratum_mine + road_density + pop_density +
+                forest_cover + cropland_cover + protected | geonunit,
+  data = match_recog_df,
+  cluster = "geonunit",
+  family = "binomial"))
+
+# Run McNemar's test
+#mcnemar.test(table(match_recog_df$stratum_mine, match_recog_df$treatment_recog))
+#chisq.test(match_recog_df$stratum_mine, match_recog_df$treatment_recog)
+
 ```
+567 of 2576 observations are on recognised territories.
+
+## Unrecognised
+Unrecognised lands vs non-Indigenous lands
+```{r}
+match_unrecog_df <- match.data(match_unrecog)
+
+table(match_unrecog_df$treatment_unrecog)
+
+model_unrecog = glm(
+  treatment_unrecog ~ stratum_mine + road_density + pop_density + 
+                forest_cover + cropland_cover + protected,
+  data = match_unrecog_df,
+  family = binomial())
+
+summary(model_unrecog)
+
+#coeftest(model_unrecog, vcov = vcovCL(model_unrecog, cluster = ~ geonunit)) # Clustered SEs by ADM1
+
+# Run McNemar's test
+mcnemar.test(table(match_unrecog_df$stratum_mine, match_unrecog_df$treatment_unrecog))
+#chisq.test(match_unrecog_df$stratum_mine, match_unrecog_df$treatment_unrecog)
+
+summary(feglm(
+  treatment_unrecog ~ stratum_mine + road_density + pop_density +  
+                forest_cover + cropland_cover + protected | geonunit,
+  data = match_unrecog_df,
+  family = binomial(),
+  cluster = ~geonunit))
+```
+161 of 1579 observations on unrecognised territories. 
+
+
+
+
+
 
 
 
