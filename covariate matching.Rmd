@@ -499,18 +499,19 @@ We will run a couple versions of this: 1) for all mines, 2) for mines in areas w
 
 Notes:
 - Try different caliber widths for robustness?
-- Can also try optimal matching as alternative to nearest neighbour
 - Try exact match by country (rather than ADM1) as robustness check
 
 1) All mines
 ```{r}
-match_all = matchit(
+#Mine vs non-mine
+match_all_mine = matchit(
   stratum_mine ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected, 
   data = test,
   method = "nearest",
   caliper = 0.1,
   exact = ~ adm1_id)
 
+#Indig vs non-Indig
 match_all = matchit(
   indigenous ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
   data = test,
@@ -518,27 +519,21 @@ match_all = matchit(
   caliper = 0.1,
   exact = ~ adm1_id)
 
-match_all = matchit(
+#Robustness check of excluding garnett
+match_all_no_garnett = matchit(
   landmark_no_garnett ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
   data = test%>%filter(adm1_id %in% adm1s_no_garnett$adm1_id),
   method = "nearest",
   caliper = 0.1,
   exact = ~ adm1_id)
 
-match_all
-
-save(match_all, file = "match_all_indig.Rdata")
+#save(match_all, file = "match_all_indig.Rdata")
 load("match_all_indig.Rdata")
-
-match_all_df <- match.data(match_all)
-nrow(match_all_df%>%filter(stratum == "mine"))/nrow(test%>%filter(stratum == "mine"))
 ```
-Match on mine: 5160 matched points from original dataset of 12075
-Match on indig: 3488 matched points from original dataset of 12075
 
 2) Mines in areas where we have recognised Indigenous territories
 ```{r}
-match_recog = matchit(
+match_recog_mine = matchit(
   stratum_mine ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
   data = test%>%filter(landmark_community == 1 & !is.na(treatment_recog)),
   method = "nearest",
@@ -552,21 +547,13 @@ match_recog = matchit(
   exact = ~ adm1_id,
   caliper = 0.1)
 
-match_recog
-save(match_recog, file = "match_recog_indig.Rdata")
+#save(match_recog, file = "match_recog_indig.Rdata")
 load("match_recog_indig.Rdata")
-
-match_recog_df <- match.data(match_recog)
-nrow(match_recog_df%>%filter(stratum == "mine"))/nrow(test%>%filter(landmark_community == 1 & !is.na(treatment_recog) & stratum == "mine"))
-
-table(match_recog_df$stratum)
 ```
-Match on mine: 2576 matched points from original dataset of 5230
-Match on indig: 1228 matched points from original dataset of 5230
 
 3) Mines in areas where we have unrecognised Indigenous territories
 ```{r}
-match_unrecog = matchit(
+match_unrecog_mine = matchit(
   stratum_mine ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
   data = test%>%filter(landmark_community == 1 & !is.na(treatment_unrecog)),
   method = "nearest",
@@ -580,22 +567,13 @@ match_unrecog = matchit(
   exact = ~ adm1_id,
   caliper = 0.1)
 
-match_unrecog
-save(match_unrecog, file = "match_unrecog_indig.Rdata")
+#save(match_unrecog, file = "match_unrecog_indig.Rdata")
 load("match_unrecog_indig.Rdata")
-
-
-match_unrecog_df <- match.data(match_unrecog)
-nrow(match_unrecog_df%>%filter(stratum == "mine"))/nrow(test%>%filter(landmark_community == 1 & !is.na(treatment_unrecog) & stratum == "mine"))
-
-table(match_unrecog_df$stratum)
 ```
-Match on mine: 1740 matched points from original dataset of 4439
-Match on indig: 430 matched points from original dataset of 4439
 
 4) Mines in any areas with recognition data
 ```{r}
-match_community = matchit(
+match_community_mine = matchit(
   stratum_mine ~ road_density + pop_density + dist_water + forest_cover + cropland_cover + protected,
   data = test%>%filter(landmark_community == 1 & !is.na(recognised)),
   method = "nearest",
@@ -609,14 +587,13 @@ match_community = matchit(
   exact = ~ adm1_id,
   caliper = 0.1)
 
-match_community
-save(match_community, file = "match_community_indig.Rdata")
+#save(match_community, file = "match_community_indig.Rdata")
 load("match_community.Rdata")
 ```
 Match on mines: 590 matched points from original dataset of 1569
 Match on indig: 332 matched points from original dataset of 1569
 
-# Balance checking
+## Balance checking
 
 Function to generate balance plots
 ```{r}
@@ -654,10 +631,83 @@ plot_balance(match_unrecog, threshold = 0.1)
 plot_balance(match_community, threshold = 0.1)
 ```
 
-# Analysis
+## Summary stats
 
-Consider:
--Fixed effects by country or adm1 (using factor() in regression equation)
+Match for all lands
+```{r}
+match_all
+match_all_df <- match.data(match_all)
+cat("\n", "% of mines successfully matched:", round(nrow(match_all_df%>%filter(stratum == "mine"))/nrow(test%>%filter(stratum == "mine"))*100, 1), "\n", "\n")
+
+
+match_all_mine
+match_all_mine_df <- match.data(match_all_mine)
+cat("\n", "% of mines successfully matched:", round(nrow(match_all_mine_df%>%filter(stratum == "mine"))/nrow(test%>%filter(stratum == "mine"))*100, 1))
+```
+Match on indigenous: 2918 matched points from original dataset of 10509, 25% of mines successfully matched
+Match on mine: 4404 matched points from original dataset of 10509, 63% of mines successfully matched
+
+Match for recognised lands:
+```{r}
+match_recog_mine_df <- match.data(match_recog_mine)
+
+
+match_recog_df <- match.data(match_recog)
+nrow(match_recog_df%>%filter(stratum == "mine"))/nrow(test%>%filter(landmark_community == 1 & !is.na(treatment_recog) & stratum == "mine"))
+
+table(match_recog_df$stratum)
+```
+Match on indig: 21% of mines successfully matched
+
+
+Match for unrecognised lands
+```{r}
+match_unrecog_mine_df = match.data(match_unrecog_mine)
+
+match_unrecog_df <- match.data(match_unrecog)
+cat("% of mines successfully matched:", round(nrow(match_unrecog_df%>%filter(stratum == "mine"))/nrow(test%>%filter(landmark_community == 1 & !is.na(treatment_unrecog) & stratum == "mine"))*100, 1))
+
+table(match_unrecog_df$stratum)
+```
+Match on indig: 10% of mines matched
+
+Recognised vs unrecognised
+```{r}
+match_community_mine_df = match.data(match_community_mine)
+cat("Breakdown of recognition status when matching by mine vs non-mine:")
+table(match_community_mine_df$recognised)
+```
+
+```{r}
+match_community_df <- match.data(match_community)
+cat("% of mines successfully matched:", round(nrow(match_community_df%>%filter(stratum == "mine"))/nrow(test%>%filter(landmark_community == 1 & !is.na(recognised) & stratum == "mine"))*100, 1),"\n", "\n")
+
+cat("Breakdown of stratum when matching by recognised vs unrecognised:")
+table(match_community_df$stratum)
+```
+
+
+
+Descriptives requested by Marc for mines vs non-mines:
+
+All Indigenous lands
+```{r}
+table(match_all_mine_df$indigenous)
+```
+
+Recognition treatment
+```{r}
+table(match_recog_mine_df$treatment_recog)
+```
+
+Non-recognition treatment
+```{r}
+table(match_unrecog_mine_df$treatment_unrecog)
+```
+
+
+
+# Analysis
 
 ## Overall
 ```{r}
