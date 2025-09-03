@@ -1,6 +1,7 @@
 .Rproj.user
+*.Rproj
 .Rhistory
-.RData
+*.RData
 .Ruserdata
 
 Raw data/
